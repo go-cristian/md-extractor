@@ -1,0 +1,40 @@
+{
+  "name": "md-extractor",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Chrome extension to extract ecommerce content into Markdown.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "lint": "biome check . && oxlint .",
+    "lint:fix": "biome check --write .",
+    "test": "vitest run",
+    "test:e2e": "sh -c 'PW_HEADLESS=false pnpm build && PW_HEADLESS=false playwright test'"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.12",
+    "@crxjs/vite-plugin": "^2.4.0",
+    "@playwright/test": "^1.59.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/chrome": "^0.1.40",
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "jsdom": "^29.0.2",
+    "oxlint": "^1.60.0",
+    "playwright": "^1.59.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.8",
+    "vitest": "^4.0.4"
+  },
+  "packageManager": "pnpm@10.30.1+sha512.3590e550d5384caa39bd5c7c739f72270234b2f6059e13018f975c313b1eb9fefcc09714048765d4d9efe961382c312e624572c0420762bdc5d5940cdf9be73a"
+}
