@@ -91,10 +91,34 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === 'loading') {
-    void writePickerState(tabId, false);
+  if (changeInfo.status === 'loading' || changeInfo.url != null) {
+    void resetExtractionStateForTab(tabId);
   }
 });
+
+async function resetExtractionStateForTab(tabId: number): Promise<void> {
+  await Promise.all([clearDraft(tabId), writePickerState(tabId, false)]);
+  await syncPickerHighlights(tabId, null);
+}
+
+async function loadDraftForCurrentTab(tabId: number): Promise<{
+  draft: DraftDocument | null;
+  active: boolean;
+}> {
+  const [draft, active, tab] = await Promise.all([
+    readDraft(tabId),
+    readPickerState(tabId),
+    chrome.tabs.get(tabId).catch(() => null),
+  ]);
+  const currentUrl = tab?.url;
+
+  if (draft != null && currentUrl != null && draft.url !== currentUrl) {
+    await resetExtractionStateForTab(tabId);
+    return { draft: null, active: false };
+  }
+
+  return { draft, active };
+}
 
 async function ensureDraft(pageContext: PageContextPayload, tabId: number): Promise<DraftDocument> {
   const existing = await readDraft(tabId);
@@ -396,10 +420,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
           sendResponse(await handleCapturePrimaryContent(message.tabId));
           return;
         case 'LOAD_DRAFT': {
-          const [draft, active] = await Promise.all([
-            readDraft(message.tabId),
-            readPickerState(message.tabId),
-          ]);
+          const { draft, active } = await loadDraftForCurrentTab(message.tabId);
           sendResponse(response({ draft, active }));
           return;
         }

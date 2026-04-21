@@ -25,6 +25,7 @@ No contiene UI React ni lógica de render de Markdown.
 - `START_PICKER` es también la puerta de entrada de la autoextracción: si no hay draft curado para la URL actual, debe sembrarlo antes de dejar el picker activo.
 - `RESTART_EXTRACTION` siempre regenera el draft desde cero para la página actual; `CLEAR_DRAFT` solo borra estado y highlights, sin volver a extraer.
 - `STOP_PICKER` debe comportarse como shutdown visual del runtime inyectado: limpiar overlay/cursor/highlights de la página, pero preservar el draft persistido.
+- Las recargas y navegaciones de una pestaña son frontera de sesión: deben limpiar draft, highlights y estado activo para no mezclar selecciones de la página anterior.
 - Cuando exista un registry de perfiles por sitio, el background debe pasar esos perfiles serializables al picker inyectado como argumentos de `executeScript`, no asumir que el runtime inyectado puede resolver imports externos.
 
 ## Usage

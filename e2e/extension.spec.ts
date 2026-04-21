@@ -195,6 +195,66 @@ test('persiste el draft por pestaña al reabrir el panel', async ({
   await productPage.close();
 });
 
+test('refrescar la página reinicia el draft y limpia selecciones anteriores', async ({
+  context,
+  extensionId,
+  serviceWorker,
+  serverOrigin,
+}) => {
+  const productPage = await context.newPage();
+  await productPage.goto(`${serverOrigin}/generic-product.html`);
+  const tabId = await getTabIdForUrl(serviceWorker, `${serverOrigin}/generic-product.html`);
+  const panel = await openPanel(context, extensionId, tabId);
+
+  await activateExtraction(panel);
+  await expect(previewRegion(panel)).toContainText('# Cafetera Nimbus 2L');
+  await expect(productPage.locator('h1')).toHaveAttribute('data-md-extractor-selected', 'true');
+
+  await productPage.reload({ waitUntil: 'domcontentloaded' });
+
+  await expect(panel.getByRole('button', { name: /Activar extracción/i })).toHaveCount(1);
+  await expect(previewRegion(panel)).not.toContainText('# Cafetera Nimbus 2L');
+  await expect(productPage.locator('h1')).not.toHaveAttribute('data-md-extractor-selected', 'true');
+
+  await activateExtraction(panel);
+  await expect(previewRegion(panel)).toContainText('# Cafetera Nimbus 2L');
+  await expect(productPage.locator('h1')).toHaveAttribute('data-md-extractor-selected', 'true');
+
+  await panel.close();
+  await productPage.close();
+});
+
+test('navegar en la misma pestaña descarta la selección de la página anterior', async ({
+  context,
+  extensionId,
+  serviceWorker,
+  serverOrigin,
+}) => {
+  const productPage = await context.newPage();
+  await productPage.goto(`${serverOrigin}/generic-product.html`);
+  const tabId = await getTabIdForUrl(serviceWorker, `${serverOrigin}/generic-product.html`);
+  const panel = await openPanel(context, extensionId, tabId);
+
+  await activateExtraction(panel);
+  await expect(previewRegion(panel)).toContainText('# Cafetera Nimbus 2L');
+
+  await productPage.goto(`${serverOrigin}/generic-product-alt.html`, {
+    waitUntil: 'domcontentloaded',
+  });
+
+  await expect(panel.getByRole('button', { name: /Activar extracción/i })).toHaveCount(1);
+  await expect(previewRegion(panel)).not.toContainText('# Cafetera Nimbus 2L');
+  await expect(previewRegion(panel)).not.toContainText('# Licuadora Atlas 900W');
+
+  await activateExtraction(panel);
+  await expect(previewRegion(panel)).toContainText('# Licuadora Atlas 900W');
+  await expect(previewRegion(panel)).toContainText('$129.900');
+  await expect(previewRegion(panel)).not.toContainText('# Cafetera Nimbus 2L');
+
+  await panel.close();
+  await productPage.close();
+});
+
 test('el panel muestra solo el toggle principal y un boton secundario de reextraccion', async ({
   context,
   extensionId,
