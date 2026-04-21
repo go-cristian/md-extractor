@@ -1,24 +1,18 @@
 import type {
+  ExtractionBlockConfig,
   PageContextPayload,
   PrimaryCapturePayload,
+  RevealStep,
   SelectionCapturePayload,
   SelectionTable,
+  SiteExtractionProfile,
 } from '@/shared/types';
 
 export function runPickerAction(
-  action: 'activate' | 'deactivate' | 'capturePrimary' | 'syncHighlights',
+  action: 'activate' | 'deactivate' | 'captureDocument' | 'capturePrimary' | 'syncHighlights',
   highlights: Array<{ selectionKey: string; selectorHint: string }> = [],
+  profiles: SiteExtractionProfile[] = [],
 ): PrimaryCapturePayload | undefined {
-  interface MetadataDraft {
-    title: string;
-    price?: string | undefined;
-    currency?: string | undefined;
-    seller?: string | undefined;
-    rating?: string | undefined;
-    availability?: string | undefined;
-    heroImageUrl?: string | undefined;
-  }
-
   interface PickerRuntime {
     active: boolean;
     overlay: HTMLDivElement;
@@ -29,36 +23,49 @@ export function runPickerAction(
 
   const NOISY_SELECTOR =
     'script, style, noscript, template, svg, iframe, canvas, link, meta, [hidden], [aria-hidden="true"]';
-  const INLINE_TAGS = new Set([
-    'A',
-    'ABBR',
-    'B',
-    'EM',
-    'I',
-    'LABEL',
-    'SMALL',
-    'SPAN',
-    'STRONG',
-    'SUB',
-    'SUP',
+  const BLOCK_CONTAINER_TAGS = new Set([
+    'ARTICLE',
+    'ASIDE',
+    'BLOCKQUOTE',
+    'DD',
+    'DIV',
+    'FIGCAPTION',
+    'HEADER',
+    'LI',
+    'MAIN',
+    'NAV',
+    'SECTION',
+    'TD',
   ]);
-  const PRIMARY_ROOT_SELECTORS = [
-    '#centerCol',
-    '#dp-container',
-    '#ppd',
-    '[role="main"]',
-    'main article',
-    'main',
-    'article',
-    '.product-card',
-  ];
-  const MANUAL_MIN_TEXT = 40;
-  const MANUAL_MAX_TEXT = 800;
   const PRIMARY_PARAGRAPH_MAX = 700;
 
   function normalizeText(value: string): string {
     return value.replace(/\s+/g, ' ').trim();
   }
+
+  function decodeEntityLiterals(value: string): string {
+    return value
+      .replaceAll('&#39;', "'")
+      .replaceAll('&#x27;', "'")
+      .replaceAll('&quot;', '"')
+      .replaceAll('&amp;', '&')
+      .replaceAll('&nbsp;', ' ');
+  }
+
+  function normalizeComparableText(value: string): string {
+    return normalizeText(decodeEntityLiterals(value));
+  }
+
+  const AMAZON_NOISE_PATTERNS: RegExp[] = [
+    /^enviar a\b/i,
+    /^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ .-]+\d{5,}\s*$/u,
+    /^agregar a la lista$/i,
+    /^agregado a$/i,
+    /^no se puede agregar el artículo a la lista\b/i,
+    /^hubo un error al recuperar tus listas de deseos\b/i,
+    /^lista no disponible\.?$/i,
+    /^no puede enviarse este producto al punto de entrega seleccionado\b/i,
+  ];
 
   function normalizeLineText(value: string): string {
     return value.replace(/\s+/g, ' ').trim();
@@ -271,19 +278,23 @@ export function runPickerAction(
         break;
       }
 
+      if (current.parentElement == null) {
+        parts.unshift(tagName);
+        break;
+      }
+
       const className = normalizeOptionalText(current.getAttribute('class'))
         ?.split(' ')
         .filter(Boolean)
         .slice(0, 2)
         .join('.');
-      const siblings =
-        current.parentElement == null
-          ? []
-          : Array.from(current.parentElement.children).filter(
-              (sibling) => sibling.tagName === current?.tagName,
-            );
+      const siblings = Array.from(current.parentElement.children).filter(
+        (sibling) => sibling.tagName === current?.tagName,
+      );
       const index = siblings.indexOf(current) + 1;
-      const suffix = className != null ? `.${className}` : `:nth-of-type(${index})`;
+      const nthOfType = `:nth-of-type(${index})`;
+      const suffix =
+        className != null ? `.${className}${siblings.length > 1 ? nthOfType : ''}` : nthOfType;
       parts.unshift(`${tagName}${suffix}`);
       current = current.parentElement;
     }
@@ -300,23 +311,83 @@ export function runPickerAction(
     return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...`;
   }
 
-  function isInlineElement(element: Element): boolean {
-    return INLINE_TAGS.has(element.tagName);
-  }
-
-  function getBlockChildren(element: Element): Element[] {
-    return Array.from(element.children).filter(
-      (child) =>
-        !isHiddenElement(child) && !child.matches(NOISY_SELECTOR) && !isInlineElement(child),
-    );
-  }
-
   function hasMeaningfulContent(element: Element): boolean {
     if (element instanceof HTMLImageElement) {
       return (element.currentSrc || element.src).length > 0;
     }
 
     return extractVisibleText(element).length > 0;
+  }
+
+  function getVisibleChildren(element: Element): Element[] {
+    return Array.from(element.children).filter(
+      (child) => !isHiddenElement(child) && !child.matches(NOISY_SELECTOR),
+    );
+  }
+
+  function hasDirectText(element: Element): boolean {
+    return Array.from(element.childNodes).some((node) => {
+      if (node.nodeType !== Node.TEXT_NODE) {
+        return false;
+      }
+
+      return normalizeOptionalText(node.textContent)?.length !== 0;
+    });
+  }
+
+  function buildOrderKey(element: Element): string {
+    const segments: string[] = [];
+    let current: Element | null = element;
+
+    while (current != null && current !== document.documentElement) {
+      const currentParent: Element | null = current.parentElement;
+      if (currentParent == null) {
+        break;
+      }
+
+      const siblings = Array.from(currentParent.children);
+      const index = siblings.indexOf(current);
+      segments.unshift(String(Math.max(0, index)).padStart(4, '0'));
+      current = currentParent;
+    }
+
+    return segments.join('.');
+  }
+
+  function shouldCaptureParagraphLike(element: Element): boolean {
+    if (element.matches('html, body')) {
+      return false;
+    }
+
+    if (element.matches('script, style, noscript, template')) {
+      return false;
+    }
+
+    if (element instanceof HTMLImageElement) {
+      return false;
+    }
+
+    if (isHeadingNode(element) || element.matches('p, table, ul, ol')) {
+      return false;
+    }
+
+    if (!hasMeaningfulContent(element)) {
+      return false;
+    }
+
+    if (hasDirectText(element)) {
+      return true;
+    }
+
+    const children = getVisibleChildren(element);
+    if (children.length === 0) {
+      return true;
+    }
+
+    return (
+      BLOCK_CONTAINER_TAGS.has(element.tagName) ||
+      children.every((child) => child.matches('span, a, strong, em, b, i, small'))
+    );
   }
 
   function splitParagraphsFromElement(element: Element): string[] {
@@ -360,7 +431,7 @@ export function runPickerAction(
     selections: SelectionCapturePayload[],
     seen: Set<string>,
     selection: SelectionCapturePayload,
-  ): void {
+  ): boolean {
     const normalizedText = normalizeOptionalText(selection.text) ?? '';
     const normalizedListItems =
       selection.listItems?.map((item) => normalizeText(item)) ?? undefined;
@@ -371,7 +442,7 @@ export function runPickerAction(
       (selection.format === 'image' && normalizedText.length === 0 && selection.imageUrl == null) ||
       seen.has(signature)
     ) {
-      return;
+      return false;
     }
 
     seen.add(signature);
@@ -380,19 +451,21 @@ export function runPickerAction(
       text: normalizedText,
       listItems: normalizedListItems,
     });
+    return true;
   }
 
   function appendParagraphSelection(
     element: Element,
     selections: SelectionCapturePayload[],
     seen: Set<string>,
-  ): void {
+  ): boolean {
     const structuredText = extractStructuredText(element);
     const inferredList = inferListFromText(structuredText);
     if (inferredList != null) {
-      appendUniqueSelection(selections, seen, {
+      return appendUniqueSelection(selections, seen, {
         kind: 'element',
         format: 'list',
+        orderKey: buildOrderKey(element),
         selectionKey: buildSelectionKey('list', element),
         text: inferredList.items.join(' · '),
         listItems: inferredList.items,
@@ -400,13 +473,13 @@ export function runPickerAction(
         htmlSnippet: buildHtmlSnippet(element),
         selectorHint: buildSelectorHint(element),
       });
-      return;
     }
 
     const paragraph = splitParagraphsFromElement(element).join('\n\n');
-    appendUniqueSelection(selections, seen, {
+    return appendUniqueSelection(selections, seen, {
       kind: 'element',
       format: 'paragraph',
+      orderKey: buildOrderKey(element),
       selectionKey: buildSelectionKey('paragraph', element),
       text: paragraph,
       htmlSnippet: buildHtmlSnippet(element),
@@ -414,34 +487,35 @@ export function runPickerAction(
     });
   }
 
-  function collectPrimarySelections(root: Element): SelectionCapturePayload[] {
+  function collectDocumentSelections(root: Element): SelectionCapturePayload[] {
     const selections: SelectionCapturePayload[] = [];
     const seen = new Set<string>();
 
-    function visit(element: Element): void {
+    function visit(element: Element): boolean {
       if (isHiddenElement(element) || element.matches(NOISY_SELECTOR)) {
-        return;
+        return false;
       }
 
       if (isHeadingNode(element)) {
-        appendUniqueSelection(selections, seen, {
+        return appendUniqueSelection(selections, seen, {
           kind: 'element',
           format: 'heading',
+          orderKey: buildOrderKey(element),
           selectionKey: buildSelectionKey('heading', element),
           text: extractVisibleText(element),
           headingLevel: headingLevel(element),
           htmlSnippet: buildHtmlSnippet(element),
           selectorHint: buildSelectorHint(element),
         });
-        return;
       }
 
       if (element.matches('table')) {
         const table = extractTableData(element);
         if (table != null) {
-          appendUniqueSelection(selections, seen, {
+          return appendUniqueSelection(selections, seen, {
             kind: 'element',
             format: 'table',
+            orderKey: buildOrderKey(element),
             selectionKey: buildSelectionKey('table', element),
             text: table.rows.map((row) => row.join(' | ')).join(' / '),
             table,
@@ -449,15 +523,16 @@ export function runPickerAction(
             selectorHint: buildSelectorHint(element),
           });
         }
-        return;
+        return false;
       }
 
       if (element.matches('ul, ol')) {
         const list = extractListData(element);
         if (list != null) {
-          appendUniqueSelection(selections, seen, {
+          return appendUniqueSelection(selections, seen, {
             kind: 'element',
             format: 'list',
+            orderKey: buildOrderKey(element),
             selectionKey: buildSelectionKey('list', element),
             text: list.items.join(' · '),
             listItems: list.items,
@@ -466,107 +541,89 @@ export function runPickerAction(
             selectorHint: buildSelectorHint(element),
           });
         }
-        return;
+        return false;
       }
 
       if (element instanceof HTMLImageElement) {
-        appendUniqueSelection(selections, seen, {
+        return appendUniqueSelection(selections, seen, {
           kind: 'image',
           format: 'image',
+          orderKey: buildOrderKey(element),
           selectionKey: buildSelectionKey('image', element),
           text: normalizeOptionalText(element.alt) ?? 'Imagen capturada',
           imageUrl: element.currentSrc || element.src,
           selectorHint: buildSelectorHint(element),
         });
-        return;
       }
 
       if (element.matches('p')) {
-        appendParagraphSelection(element, selections, seen);
-        return;
+        return appendParagraphSelection(element, selections, seen);
       }
 
-      const children = getBlockChildren(element).filter(hasMeaningfulContent);
-      if (children.length === 0) {
-        appendParagraphSelection(element, selections, seen);
-        return;
+      let capturedDescendant = false;
+      getVisibleChildren(element).forEach((child) => {
+        if (visit(child)) {
+          capturedDescendant = true;
+        }
+      });
+
+      if (capturedDescendant) {
+        return true;
       }
 
-      children.forEach((child) => {
-        visit(child);
-      });
+      if (!shouldCaptureParagraphLike(element)) {
+        return false;
+      }
+
+      return appendParagraphSelection(element, selections, seen);
     }
 
-    const roots = getBlockChildren(root).filter(hasMeaningfulContent);
-    if (roots.length === 0) {
-      visit(root);
-    } else {
-      roots.forEach((child) => {
-        visit(child);
-      });
-    }
-
+    visit(root);
     return selections;
   }
 
-  function findPrimaryContentRoot(): Element | null {
-    for (const selector of PRIMARY_ROOT_SELECTORS) {
-      const candidate = document.querySelector(selector);
-      if (candidate != null && hasMeaningfulContent(candidate)) {
-        return candidate;
-      }
+  function resolveSelectionElement(initial: Element): Element {
+    if (
+      (isHiddenElement(initial) || initial.matches(NOISY_SELECTOR)) &&
+      initial.parentElement != null
+    ) {
+      return resolveSelectionElement(initial.parentElement);
     }
 
-    const title = document.querySelector('#productTitle, [data-automation-id="product-title"], h1');
-    if (title != null) {
-      return (
-        title.closest('#centerCol, #dp-container, main, [role="main"], article, section') ??
-        title.parentElement
-      );
+    const heading = headingElement(initial);
+    if (heading != null) {
+      return heading;
     }
 
-    return document.body;
-  }
+    const table = initial.closest('table');
+    if (table != null) {
+      return table;
+    }
 
-  function findSemanticContainer(initial: Element): Element {
+    const list = initial.closest('ul, ol');
+    if (list != null) {
+      return list;
+    }
+
+    const paragraph = initial.closest('p');
+    if (paragraph != null) {
+      return paragraph;
+    }
+
     if (initial instanceof HTMLImageElement) {
       return initial;
     }
 
-    const semanticMatch = initial.closest(
-      'p, li, article, section, [data-component], [data-testid], [itemprop]',
-    );
-    if (semanticMatch != null) {
-      const semanticTextLength = extractVisibleText(semanticMatch).length;
-      if (semanticTextLength >= MANUAL_MIN_TEXT && semanticTextLength <= MANUAL_MAX_TEXT) {
-        return semanticMatch;
-      }
-    }
-
-    if (extractVisibleText(initial).length >= MANUAL_MIN_TEXT) {
-      return initial;
-    }
-
-    let current: Element = initial;
-    for (let depth = 0; depth < 4 && current.parentElement != null; depth += 1) {
-      const next = current.parentElement;
-      const textLength = extractVisibleText(next).length;
-      if (textLength >= MANUAL_MIN_TEXT && textLength <= MANUAL_MAX_TEXT) {
-        return next;
+    let current: Element | null = initial;
+    while (current != null && current !== document.body && current !== document.documentElement) {
+      if (shouldCaptureParagraphLike(current)) {
+        return current;
       }
 
-      current = next;
-    }
-
-    if (semanticMatch != null) {
-      return semanticMatch;
+      current = current.parentElement;
     }
 
     return initial;
-  }
-
-  function detectSiteName(): string {
-    return window.location.hostname.replace(/^www\./i, '');
   }
 
   function readText(selectors: string[]): string | undefined {
@@ -577,6 +634,7 @@ export function runPickerAction(
         return text;
       }
     }
+
     return undefined;
   }
 
@@ -597,103 +655,500 @@ export function runPickerAction(
     return undefined;
   }
 
-  function extractMetadata(): MetadataDraft {
+  function detectSiteName(): string {
     const hostname = window.location.hostname;
-    const metadata: MetadataDraft = {
-      title: readMeta('meta[property="og:title"]') ?? readText(['h1']) ?? document.title,
-    };
-
-    const genericPrice =
-      readMeta('meta[property="product:price:amount"]') ??
-      readText(['[itemprop="price"]', '.price', '[data-price]']);
-    if (genericPrice != null) {
-      metadata.price = genericPrice;
-    }
-
-    const genericCurrency = readMeta('meta[property="product:price:currency"]');
-    if (genericCurrency != null) {
-      metadata.currency = genericCurrency;
-    }
-
-    const genericImage = readMeta('meta[property="og:image"]');
-    if (genericImage != null) {
-      metadata.heroImageUrl = genericImage;
-    }
-
     if (
       /(^|\.)amazon\./i.test(hostname) ||
       document.querySelector('#productTitle') != null ||
-      document.querySelector('#acrPopover') != null
+      document.querySelector('#dp-container') != null
     ) {
-      metadata.title =
-        readText(['#productTitle', '[data-automation-id="product-title"]']) ?? metadata.title;
-      const amazonPrice = readText([
-        '.a-price .a-offscreen',
-        '#corePriceDisplay_desktop_feature_div .a-offscreen',
-      ]);
-      const amazonSeller = readText(['#sellerProfileTriggerId', '#bylineInfo']);
-      const amazonRating = readText([
-        '#acrPopover [aria-hidden="true"]',
-        '[data-hook="rating-out-of-text"]',
-      ]);
-      const amazonAvailability = readText(['#availability span', '#outOfStock span']);
-      const amazonImage = readAttribute(['#landingImage', '#imgTagWrapperId img'], 'src');
+      return 'amazon';
+    }
 
-      if (amazonPrice != null) {
-        metadata.price = amazonPrice;
-      }
-      if (amazonSeller != null) {
-        metadata.seller = amazonSeller;
-      }
-      if (amazonRating != null) {
-        metadata.rating = amazonRating;
-      }
-      if (amazonAvailability != null) {
-        metadata.availability = amazonAvailability;
-      }
-      if (amazonImage != null) {
-        metadata.heroImageUrl = amazonImage;
-      }
-    } else if (
+    if (
       /myshopify\.com$/i.test(hostname) ||
       document.querySelector('meta[name="shopify-digital-wallet"]') != null ||
       document.documentElement.innerHTML.includes('Shopify.theme')
     ) {
-      metadata.title =
-        readText(['[data-product-title]', '.product__title', '.product-single__title', 'h1']) ??
-        metadata.title;
-      const shopifyPrice = readText([
-        '[data-product-price]',
-        '.price-item--regular',
-        '.product__price',
-        '.price',
-      ]);
-      const shopifySeller = readMeta('meta[property="product:brand"]');
-      const shopifyAvailability = readText([
-        '[data-product-inventory-status]',
-        '.product-form__inventory',
-        '[data-inventory-status]',
-      ]);
-      const shopifyImage = readAttribute(
-        ['.product__media img', '.product-featured-media img'],
-        'src',
-      );
+      return 'shopify';
+    }
 
-      if (shopifyPrice != null) {
-        metadata.price = shopifyPrice;
-      }
-      if (shopifySeller != null) {
-        metadata.seller = shopifySeller;
-      }
-      if (shopifyAvailability != null) {
-        metadata.availability = shopifyAvailability;
-      }
-      if (shopifyImage != null) {
-        metadata.heroImageUrl = shopifyImage;
-      }
+    return hostname.replace(/^www\./i, '');
+  }
+
+  function extractMetadata(): PageContextPayload['metadata'] {
+    const metadata: PageContextPayload['metadata'] = {};
+    const baseTitle = readMeta('meta[property="og:title"]') ?? readText(['h1']) ?? document.title;
+    metadata.title = baseTitle;
+    metadata.price =
+      readMeta('meta[property="product:price:amount"]') ??
+      readText(['[itemprop="price"]', '.price', '[data-price]']);
+    metadata.currency = readMeta('meta[property="product:price:currency"]');
+    metadata.seller = readMeta('meta[property="product:brand"]');
+    metadata.availability = readMeta('meta[property="product:availability"]');
+    metadata.heroImageUrl = readMeta('meta[property="og:image"]');
+
+    if (detectSiteName() === 'amazon') {
+      return {
+        ...metadata,
+        title: readText(['#productTitle', '[data-automation-id="product-title"]']) ?? baseTitle,
+        price: readText([
+          '#corePriceDisplay_desktop_feature_div .a-offscreen',
+          '.a-price .a-offscreen',
+        ]),
+        seller: readText(['#sellerProfileTriggerId', '#bylineInfo']),
+        rating: readText(['#acrPopover [aria-hidden="true"]', '[data-hook="rating-out-of-text"]']),
+        availability: readText(['#availability span', '#outOfStock span']),
+        heroImageUrl: readAttribute(['#landingImage', '#imgTagWrapperId img'], 'src'),
+      };
+    }
+
+    if (detectSiteName() === 'shopify') {
+      return {
+        ...metadata,
+        title:
+          readText(['[data-product-title]', '.product__title', '.product-single__title', 'h1']) ??
+          baseTitle,
+        price: readText([
+          '[data-product-price]',
+          '.price-item--regular',
+          '.product__price',
+          '.price',
+        ]),
+        seller: readMeta('meta[property="product:brand"]'),
+        availability:
+          readText([
+            '[data-product-inventory-status]',
+            '.product-form__inventory',
+            '[data-inventory-status]',
+          ]) ?? metadata.availability,
+        heroImageUrl:
+          readMeta('meta[property="og:image"]') ??
+          readAttribute(['.product__media img', '.product-featured-media img'], 'src'),
+      };
     }
 
     return metadata;
+  }
+
+  function matchesProfile(profile: SiteExtractionProfile): boolean {
+    const hostnameMatch =
+      profile.hostnames?.some(
+        (hostname) =>
+          window.location.hostname === hostname ||
+          window.location.hostname.endsWith(`.${hostname}`),
+      ) ?? false;
+    const signalMatch =
+      profile.signals?.some((selector) => document.querySelector(selector) != null) ?? false;
+
+    return hostnameMatch || signalMatch;
+  }
+
+  function anchorElement(profile: SiteExtractionProfile): Element | null {
+    for (const selector of profile.anchorSelectors ?? []) {
+      const element = document.querySelector(selector);
+      if (element != null) {
+        return element;
+      }
+    }
+
+    return null;
+  }
+
+  function resolveRevealTrigger(step: RevealStep): HTMLElement | null {
+    if (step == null) {
+      return null;
+    }
+
+    if (step.selector != null) {
+      const trigger = document.querySelector(step.selector);
+      if (trigger instanceof HTMLElement) {
+        return trigger;
+      }
+    }
+
+    if (step.text == null) {
+      return null;
+    }
+
+    const candidates = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        'button, a, summary, [role="button"], .a-expander-header',
+      ),
+    );
+
+    return (
+      candidates.find((candidate) => normalizeText(candidate.textContent ?? '') === step.text) ??
+      null
+    );
+  }
+
+  function revealElement(element: Element): void {
+    if (!(element instanceof HTMLElement)) {
+      return;
+    }
+
+    element.hidden = false;
+    element.removeAttribute('hidden');
+    if (element.getAttribute('aria-hidden') === 'true') {
+      element.setAttribute('aria-hidden', 'false');
+    }
+    if (element.style.display === 'none') {
+      element.style.display = 'block';
+    }
+    if (element.style.visibility === 'hidden') {
+      element.style.visibility = 'visible';
+    }
+    if (element.style.maxHeight.length > 0 && element.style.maxHeight !== 'none') {
+      element.style.maxHeight = 'none';
+    }
+    element.classList.remove('aok-hidden');
+  }
+
+  function runRevealStep(step: RevealStep): boolean {
+    const trigger = resolveRevealTrigger(step);
+    if (!(trigger instanceof HTMLElement)) {
+      return false;
+    }
+
+    trigger.click();
+    const controlsId = trigger.getAttribute('aria-controls');
+    if (controlsId != null) {
+      const controlled = document.getElementById(controlsId);
+      if (controlled instanceof Element) {
+        revealElement(controlled);
+        trigger.setAttribute('aria-expanded', 'true');
+      }
+    }
+
+    step.revealSelectors?.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((element) => {
+        revealElement(element);
+      });
+    });
+
+    return true;
+  }
+
+  function isAmazonNoiseSelection(
+    selection: SelectionCapturePayload,
+    anchorText: string | null,
+  ): boolean {
+    if (selection.format === 'image') {
+      return true;
+    }
+
+    if (selection.format !== 'paragraph') {
+      return false;
+    }
+
+    const comparableText = normalizeComparableText(selection.text);
+    if (comparableText.length === 0) {
+      return false;
+    }
+
+    if (anchorText != null && comparableText === anchorText) {
+      return true;
+    }
+
+    return AMAZON_NOISE_PATTERNS.some((pattern) => pattern.test(comparableText));
+  }
+
+  function isSimpleKeyValueTable(selection: SelectionCapturePayload): boolean {
+    return (
+      selection.format === 'table' &&
+      selection.table != null &&
+      selection.table.rows.length > 0 &&
+      selection.table.rows.every((row) => row.length === 2)
+    );
+  }
+
+  function isVoyagerSideSheetSelection(selection: SelectionCapturePayload): boolean {
+    return selection.selectorHint?.includes('#voyager-ns-desktop-side-sheet-content') ?? false;
+  }
+
+  function isAmazonMergeCandidate(selection: SelectionCapturePayload): boolean {
+    return (
+      isVoyagerSideSheetSelection(selection) &&
+      (selection.format === 'heading' || isSimpleKeyValueTable(selection))
+    );
+  }
+
+  function mergeAmazonSpecTables(selections: SelectionCapturePayload[]): SelectionCapturePayload[] {
+    const firstVoyagerIndex = selections.findIndex((selection) =>
+      isAmazonMergeCandidate(selection),
+    );
+    const voyagerTables = selections.filter(
+      (selection) => isVoyagerSideSheetSelection(selection) && isSimpleKeyValueTable(selection),
+    );
+
+    if (firstVoyagerIndex === -1 || voyagerTables.length < 2) {
+      return selections;
+    }
+
+    const rowKeys = new Set<string>();
+    const rows = voyagerTables.flatMap((tableSelection) =>
+      (tableSelection.table?.rows ?? []).filter((row) => {
+        const key = row.join('\u241f');
+        if (rowKeys.has(key)) {
+          return false;
+        }
+        rowKeys.add(key);
+        return true;
+      }),
+    );
+    const firstTable = voyagerTables[0];
+    if (firstTable == null) {
+      return selections;
+    }
+
+    const mergedTable: SelectionCapturePayload = {
+      ...firstTable,
+      text: rows.map((row) => row.join(' | ')).join(' / '),
+      table: {
+        headers: ['Campo', 'Valor'],
+        rows,
+      },
+    };
+
+    const normalizedSelections: SelectionCapturePayload[] = [];
+    let insertedMergedTable = false;
+
+    selections.forEach((selection, index) => {
+      if (index === firstVoyagerIndex && !insertedMergedTable) {
+        normalizedSelections.push(mergedTable);
+        insertedMergedTable = true;
+      }
+
+      if (isAmazonMergeCandidate(selection)) {
+        return;
+      }
+
+      normalizedSelections.push(selection);
+    });
+
+    if (!insertedMergedTable) {
+      normalizedSelections.push(mergedTable);
+    }
+
+    return normalizedSelections;
+  }
+
+  function normalizeAmazonSelections(
+    selections: SelectionCapturePayload[],
+    anchorText: string | null,
+  ): SelectionCapturePayload[] {
+    const filteredSelections = selections.filter(
+      (selection) => !isAmazonNoiseSelection(selection, anchorText),
+    );
+
+    return normalizeAmazonImportantInformation(mergeAmazonSpecTables(filteredSelections));
+  }
+
+  function isAmazonImportantInformationSelection(selection: SelectionCapturePayload): boolean {
+    return (
+      selection.selectorHint?.includes('#pqv-important-information') === true ||
+      selection.selectorHint?.includes('#important-information') === true ||
+      selection.selectorHint?.includes('#importantInformation_feature_div') === true
+    );
+  }
+
+  function normalizeAmazonImportantInformation(
+    selections: SelectionCapturePayload[],
+  ): SelectionCapturePayload[] {
+    const normalizedSelections: SelectionCapturePayload[] = [];
+    const seenImportantInfoEntries = new Set<string>();
+
+    selections.forEach((selection) => {
+      if (!isAmazonImportantInformationSelection(selection)) {
+        normalizedSelections.push(selection);
+        return;
+      }
+
+      const comparableText = normalizeComparableText(selection.text);
+      if (comparableText.length === 0) {
+        return;
+      }
+
+      const signature =
+        selection.format === 'heading'
+          ? `${selection.format}:${selection.headingLevel ?? 0}:${comparableText}`
+          : `${selection.format}:${comparableText}`;
+
+      if (seenImportantInfoEntries.has(signature)) {
+        return;
+      }
+
+      seenImportantInfoEntries.add(signature);
+      normalizedSelections.push(selection);
+    });
+
+    return normalizedSelections;
+  }
+
+  function selectionFromBlock(
+    block: ExtractionBlockConfig,
+    element: Element,
+  ): SelectionCapturePayload | null {
+    switch (block.type) {
+      case 'heading': {
+        const text = normalizeOptionalText(extractVisibleText(element));
+        if (text == null) {
+          return null;
+        }
+
+        return {
+          kind: 'element',
+          format: 'heading',
+          orderKey: buildOrderKey(element),
+          selectionKey: buildSelectionKey('heading', element),
+          text,
+          headingLevel: block.headingLevel ?? 2,
+          htmlSnippet: buildHtmlSnippet(element),
+          selectorHint: buildSelectorHint(element),
+        };
+      }
+      case 'paragraph': {
+        const text = normalizeOptionalText(extractVisibleText(element));
+        if (text == null) {
+          return null;
+        }
+
+        return {
+          kind: 'element',
+          format: 'paragraph',
+          orderKey: buildOrderKey(element),
+          selectionKey: buildSelectionKey('paragraph', element),
+          text,
+          htmlSnippet: buildHtmlSnippet(element),
+          selectorHint: buildSelectorHint(element),
+        };
+      }
+      case 'list': {
+        const list = extractListData(element);
+        if (list == null) {
+          return null;
+        }
+
+        return {
+          kind: 'element',
+          format: 'list',
+          orderKey: buildOrderKey(element),
+          selectionKey: buildSelectionKey('list', element),
+          text: list.items.join(' · '),
+          listItems: list.items,
+          orderedList: list.ordered,
+          htmlSnippet: buildHtmlSnippet(element),
+          selectorHint: buildSelectorHint(element),
+        };
+      }
+      case 'table': {
+        const table = extractTableData(element);
+        if (table == null) {
+          return null;
+        }
+
+        return {
+          kind: 'element',
+          format: 'table',
+          orderKey: buildOrderKey(element),
+          selectionKey: buildSelectionKey('table', element),
+          text: table.rows.map((row) => row.join(' | ')).join(' / '),
+          table,
+          htmlSnippet: buildHtmlSnippet(element),
+          selectorHint: buildSelectorHint(element),
+        };
+      }
+      case 'image': {
+        if (!(element instanceof HTMLImageElement)) {
+          return null;
+        }
+
+        return {
+          kind: 'image',
+          format: 'image',
+          orderKey: buildOrderKey(element),
+          selectionKey: buildSelectionKey('image', element),
+          text: normalizeOptionalText(element.alt) ?? 'Imagen capturada',
+          imageUrl: element.currentSrc || element.src,
+          selectorHint: buildSelectorHint(element),
+        };
+      }
+    }
+  }
+
+  function extractWithProfiles(): SelectionCapturePayload[] | null {
+    const profile = profiles.find((candidate) => matchesProfile(candidate));
+    if (profile == null) {
+      return null;
+    }
+
+    profile.reveal?.forEach((step) => {
+      runRevealStep(step);
+    });
+
+    const selections: SelectionCapturePayload[] = [];
+    const seen = new Set<string>();
+
+    profile.blocks.forEach((block) => {
+      block.selectors.forEach((selector) => {
+        document.querySelectorAll(selector).forEach((element) => {
+          const selection = selectionFromBlock(block, element);
+          if (selection == null) {
+            return;
+          }
+
+          appendUniqueSelection(selections, seen, selection);
+        });
+      });
+    });
+
+    if (selections.length === 0) {
+      return null;
+    }
+    const anchor = anchorElement(profile);
+    if (anchor == null) {
+      const sortedSelections = selections.sort((left, right) =>
+        (left.orderKey ?? '').localeCompare(right.orderKey ?? ''),
+      );
+
+      return profile.id === 'amazon'
+        ? normalizeAmazonSelections(sortedSelections, null)
+        : sortedSelections;
+    }
+
+    const anchorOrderKey = buildOrderKey(anchor);
+    const anchorText = normalizeOptionalText(extractVisibleText(anchor));
+    const comparableAnchorText = anchorText == null ? null : normalizeComparableText(anchorText);
+    const anchoredSelections = selections.filter((selection) => {
+      if (comparableAnchorText == null) {
+        return true;
+      }
+
+      return !(
+        selection.format !== 'heading' &&
+        normalizeComparableText(selection.text) === comparableAnchorText
+      );
+    });
+
+    const orderedSelections = anchoredSelections.sort((left, right) => {
+      const leftIsAnchor = left.format === 'heading' && left.orderKey === anchorOrderKey;
+      const rightIsAnchor = right.format === 'heading' && right.orderKey === anchorOrderKey;
+
+      if (leftIsAnchor && !rightIsAnchor) {
+        return -1;
+      }
+
+      if (!leftIsAnchor && rightIsAnchor) {
+        return 1;
+      }
+
+      return (left.orderKey ?? '').localeCompare(right.orderKey ?? '');
+    });
+
+    return profile.id === 'amazon'
+      ? normalizeAmazonSelections(orderedSelections, comparableAnchorText)
+      : orderedSelections;
   }
 
   function createPageContext(): PageContextPayload {
@@ -706,10 +1161,11 @@ export function runPickerAction(
     };
   }
 
-  function capturePrimaryContent(): PrimaryCapturePayload {
+  function captureDocumentContent(): PrimaryCapturePayload {
     const pageContext = createPageContext();
-    const root = findPrimaryContentRoot();
-    const selections = root == null ? [] : collectPrimarySelections(root);
+    const selections =
+      extractWithProfiles() ??
+      (document.body == null ? [] : collectDocumentSelections(document.body));
 
     return {
       pageContext,
@@ -717,8 +1173,8 @@ export function runPickerAction(
     };
   }
 
-  if (action === 'capturePrimary') {
-    return capturePrimaryContent();
+  if (action === 'captureDocument' || action === 'capturePrimary') {
+    return captureDocumentContent();
   }
 
   const globalKey = '__MD_EXTRACTOR_PICKER__';
@@ -729,6 +1185,9 @@ export function runPickerAction(
   if (runtimeHost[globalKey] != null) {
     if (action === 'activate') {
       runtimeHost[globalKey]?.activate();
+      if (highlights.length > 0) {
+        runtimeHost[globalKey]?.syncHighlights(highlights);
+      }
     }
     if (action === 'deactivate') {
       runtimeHost[globalKey]?.deactivate();
@@ -827,21 +1286,6 @@ export function runPickerAction(
     selectionTargets.set(selectionKey, element);
   }
 
-  async function syncPageContext(): Promise<void> {
-    await chrome.runtime.sendMessage({
-      type: 'SYNC_PAGE_CONTEXT',
-      pageContext: createPageContext(),
-    });
-  }
-
-  async function pushSelection(selection: SelectionCapturePayload): Promise<void> {
-    await chrome.runtime.sendMessage({
-      type: 'ADD_SELECTION_FROM_PAGE',
-      selection,
-      pageContext: createPageContext(),
-    });
-  }
-
   async function toggleSelection(selection: SelectionCapturePayload): Promise<void> {
     await chrome.runtime.sendMessage({
       type: 'TOGGLE_SELECTION_FROM_PAGE',
@@ -850,149 +1294,112 @@ export function runPickerAction(
     });
   }
 
-  async function captureClickedElement(target: Element): Promise<void> {
-    if (target instanceof HTMLImageElement) {
-      const selectionKey = buildSelectionKey('image', target);
-      rememberSelectionTarget(selectionKey, target);
-      await toggleSelection({
+  function buildSelectionFromElement(element: Element): SelectionCapturePayload | null {
+    const orderKey = buildOrderKey(element);
+
+    if (element instanceof HTMLImageElement) {
+      return {
         kind: 'image',
         format: 'image',
-        selectionKey,
-        text: normalizeOptionalText(target.alt) ?? 'Imagen capturada',
-        imageUrl: target.currentSrc || target.src,
-        selectorHint: buildSelectorHint(target),
-      });
-      return;
+        orderKey,
+        selectionKey: buildSelectionKey('image', element),
+        text: normalizeOptionalText(element.alt) ?? 'Imagen capturada',
+        imageUrl: element.currentSrc || element.src,
+        selectorHint: buildSelectorHint(element),
+      };
     }
 
-    const heading = headingElement(target);
-    if (heading != null) {
-      const text = extractVisibleText(heading);
+    if (isHeadingNode(element)) {
+      const text = extractVisibleText(element);
       if (text.length === 0) {
-        return;
+        return null;
       }
 
-      const selectionKey = buildSelectionKey('heading', heading);
-      rememberSelectionTarget(selectionKey, heading);
-      await toggleSelection({
+      return {
         kind: 'element',
         format: 'heading',
-        selectionKey,
+        orderKey,
+        selectionKey: buildSelectionKey('heading', element),
         text,
-        headingLevel: headingLevel(heading),
-        htmlSnippet: buildHtmlSnippet(heading),
-        selectorHint: buildSelectorHint(heading),
-      });
-      return;
+        headingLevel: headingLevel(element),
+        htmlSnippet: buildHtmlSnippet(element),
+        selectorHint: buildSelectorHint(element),
+      };
     }
 
-    const table = extractTableData(target);
-    if (table != null) {
-      const tableElement = target.closest('table') ?? target;
-      const selectionKey = buildSelectionKey('table', tableElement);
-      rememberSelectionTarget(selectionKey, tableElement);
-      await toggleSelection({
+    const table = extractTableData(element);
+    if (table != null && element.matches('table')) {
+      return {
         kind: 'element',
         format: 'table',
-        selectionKey,
+        orderKey,
+        selectionKey: buildSelectionKey('table', element),
         text: table.rows.map((row) => row.join(' | ')).join(' / '),
         table,
-        htmlSnippet: buildHtmlSnippet(tableElement),
-        selectorHint: buildSelectorHint(tableElement),
-      });
-      return;
+        htmlSnippet: buildHtmlSnippet(element),
+        selectorHint: buildSelectorHint(element),
+      };
     }
 
-    const list = extractListData(target);
-    if (list != null) {
-      const listElement = target.closest('ul, ol') ?? target;
-      const selectionKey = buildSelectionKey('list', listElement);
-      rememberSelectionTarget(selectionKey, listElement);
-      await toggleSelection({
+    const list = extractListData(element);
+    if (list != null && element.matches('ul, ol')) {
+      return {
         kind: 'element',
         format: 'list',
-        selectionKey,
+        orderKey,
+        selectionKey: buildSelectionKey('list', element),
         text: list.items.join(' · '),
         listItems: list.items,
         orderedList: list.ordered,
-        htmlSnippet: buildHtmlSnippet(listElement),
-        selectorHint: buildSelectorHint(listElement),
-      });
-      return;
+        htmlSnippet: buildHtmlSnippet(element),
+        selectorHint: buildSelectorHint(element),
+      };
     }
 
-    const element = findSemanticContainer(target);
-    const selectorHint = buildSelectorHint(element);
+    if (!shouldCaptureParagraphLike(element) && !element.matches('p')) {
+      return null;
+    }
+
     const inferredList = inferListFromText(extractStructuredText(element));
     if (inferredList != null) {
-      const selectionKey = buildSelectionKey('list', element);
-      rememberSelectionTarget(selectionKey, element);
-      await toggleSelection({
+      return {
         kind: 'element',
         format: 'list',
-        selectionKey,
+        orderKey,
+        selectionKey: buildSelectionKey('list', element),
         text: inferredList.items.join(' · '),
         listItems: inferredList.items,
         orderedList: inferredList.ordered,
         htmlSnippet: buildHtmlSnippet(element),
-        selectorHint,
-      });
-      return;
+        selectorHint: buildSelectorHint(element),
+      };
     }
 
-    const text = extractVisibleText(element);
+    const text = splitParagraphsFromElement(element).join('\n\n');
     if (text.length === 0) {
-      return;
+      return null;
     }
 
-    const selectionKey = buildSelectionKey('paragraph', element);
-    rememberSelectionTarget(selectionKey, element);
-    await toggleSelection({
+    return {
       kind: 'element',
       format: 'paragraph',
-      selectionKey,
+      orderKey,
+      selectionKey: buildSelectionKey('paragraph', element),
       text,
       htmlSnippet: buildHtmlSnippet(element),
-      selectorHint,
-    });
+      selectorHint: buildSelectorHint(element),
+    };
   }
 
-  async function captureTextSelection(): Promise<void> {
-    const selection = window.getSelection();
-    const rawText = selection?.toString();
-    if (rawText == null) {
+  async function captureClickedElement(target: Element): Promise<void> {
+    const element = resolveSelectionElement(target);
+    const selection = buildSelectionFromElement(element);
+    if (selection == null) {
       return;
     }
 
-    const anchor =
-      selection?.anchorNode instanceof Element
-        ? selection.anchorNode
-        : (selection?.anchorNode?.parentElement ?? null);
-
-    const inferredList = inferListFromText(rawText);
-    if (inferredList != null) {
-      await pushSelection({
-        kind: 'textRange',
-        format: 'list',
-        text: inferredList.items.join(' · '),
-        listItems: inferredList.items,
-        orderedList: inferredList.ordered,
-        selectorHint: anchor == null ? undefined : buildSelectorHint(anchor),
-      });
-      return;
-    }
-
-    const text = normalizeOptionalText(rawText);
-    if (text == null) {
-      return;
-    }
-
-    await pushSelection({
-      kind: 'textRange',
-      format: 'paragraph',
-      text,
-      selectorHint: anchor == null ? undefined : buildSelectorHint(anchor),
-    });
+    rememberSelectionTarget(selection.selectionKey, element);
+    await toggleSelection(selection);
   }
 
   function updateOverlay(element: Element | null): void {
@@ -1020,7 +1427,7 @@ export function runPickerAction(
       return;
     }
 
-    updateOverlay(findSemanticContainer(target));
+    updateOverlay(resolveSelectionElement(target));
   }
 
   function onClick(event: MouseEvent): void {
@@ -1043,17 +1450,8 @@ export function runPickerAction(
     void captureClickedElement(target);
   }
 
-  function onMouseUp(): void {
-    if (!isActive) {
-      return;
-    }
-
-    void captureTextSelection();
-  }
-
   document.addEventListener('mousemove', onMouseMove, true);
   document.addEventListener('click', onClick, true);
-  document.addEventListener('mouseup', onMouseUp, true);
 
   const runtime: PickerRuntime = {
     active: false,
@@ -1063,14 +1461,13 @@ export function runPickerAction(
       runtime.active = true;
       overlay.style.opacity = '0';
       document.documentElement.style.cursor = 'crosshair';
-      void syncPageContext();
     },
     deactivate() {
       isActive = false;
       runtime.active = false;
       overlay.style.opacity = '0';
+      clearPersistentHighlights();
       document.documentElement.style.removeProperty('cursor');
-      window.getSelection()?.removeAllRanges();
     },
     syncHighlights(nextHighlights) {
       syncPersistentHighlights(nextHighlights);
@@ -1112,5 +1509,8 @@ export function runPickerAction(
 
   runtimeHost[globalKey] = runtime;
   runtime.activate();
+  if (highlights.length > 0) {
+    runtime.syncHighlights(highlights);
+  }
   return undefined;
 }

@@ -6,6 +6,35 @@
   </head>
   <body>
     <div id="dp-container">
+      <div id="voyagerNorthstarATF">
+        <a
+          class="a-expander-header a-declarative a-expander-section-header a-link-section-expander a-size-medium"
+          aria-expanded="false"
+        >
+          Detalles del producto
+        </a>
+        <div id="item_details" style="display: none">
+          <table class="a-keyvalue voyager-ns-desktop-table">
+            <tr><th>UPC</th><td>027242923473</td></tr>
+            <tr><th>Manufacturer</th><td>Sony Electronics Inc.</td></tr>
+          </table>
+        </div>
+      </div>
+      <div id="voyagerSideSheet_feature_div">
+        <a class="a-button-text" aria-disabled="true">Ver todas las especificaciones del producto</a>
+        <div id="voyager-ns-desktop-side-sheet-content" style="visibility: hidden">
+          <h1>Especificaciones del producto</h1>
+          <h2>Características y especificaciones</h2>
+          <table class="prodDetTable">
+            <tr><th>Color</th><td>Midnight Blue</td></tr>
+            <tr><th>Connectivity</th><td>Bluetooth 5.2</td></tr>
+          </table>
+          <h2>Medidas</h2>
+          <table class="prodDetTable">
+            <tr><th>Dimensions</th><td>10 x 8 x 3 inches</td></tr>
+          </table>
+        </div>
+      </div>
       <span id="productTitle">Sony WH-1000XM5 Wireless Headphones</span>
       <div id="corePriceDisplay_desktop_feature_div">
         <span class="a-price"><span class="a-offscreen">$399.99</span></span>
@@ -14,7 +43,63 @@
       <div id="acrPopover"><span aria-hidden="true">4.7 out of 5 stars</span></div>
       <div id="availability"><span>In Stock</span></div>
       <img id="landingImage" src="https://images.amazon.test/sony.jpg" alt="Sony headphones" />
-      <p id="description">Industry-leading noise cancelling with premium sound.</p>
+      <div id="feature-bullets">
+        <ul>
+          <li>Industry-leading noise cancelling with premium sound.</li>
+          <li>Crystal clear hands-free calling.</li>
+        </ul>
+        <button
+          id="feature-bullets-expand"
+          type="button"
+          aria-expanded="false"
+          aria-controls="feature-bullets-hidden"
+        >
+          Show more
+        </button>
+        <div id="feature-bullets-hidden" hidden>
+          <ul>
+            <li>Battery life up to 30 hours.</li>
+            <li>Lightweight design for all-day comfort.</li>
+          </ul>
+        </div>
+      </div>
+      <section id="productDetails_feature_div">
+        <table>
+          <tr><th>Brand</th><td>Sony</td></tr>
+          <tr><th>Model</th><td>WH-1000XM5</td></tr>
+        </table>
+      </section>
+      <div id="productQuickView_feature_div">
+        <div id="a-popover-pqvOverlay" class="a-popover-preload" hidden>
+          <div id="pqv-feature-bullets">
+            <h2 id="pqv-feature-bullets-heading">About this item</h2>
+            <ul>
+              <li>Industry-leading noise cancelling with premium sound.</li>
+              <li>Crystal clear hands-free calling.</li>
+              <li>Battery life up to 30 hours.</li>
+            </ul>
+          </div>
+          <div id="pqv-description">
+            <h2 id="pqv-description-heading">Product description</h2>
+            <div>Wireless over-ear headphones with adaptive noise cancelling.</div>
+          </div>
+          <div id="pqv-important-information">
+            <h2 id="pqv-important-information-heading">Important information</h2>
+            <h3>Ingredients</h3>
+            <p>Jerusalem artichoke root, chicory root fiber, vegetable capsule.</p>
+            <h3>Directions</h3>
+            <p>Take one capsule daily with water.</p>
+            <a id="pqv-report-issue" href="#tellAmazon_feature_div">
+              Report an issue with this product or seller
+            </a>
+            <div id="pqv-feedback">
+              <h2 id="pqv-feedback-heading">Feedback</h2>
+              <p>Was this summary helpful?</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <aside id="bundleWidget">Customers often keep this item with a travel case.</aside>
     </div>
   </body>
 </html>

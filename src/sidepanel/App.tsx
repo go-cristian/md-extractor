@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { generateMarkdown } from '@/shared/markdown';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { buildMarkdownPreviewBlocks, generateMarkdown } from '@/shared/markdown';
 import type { DraftDocument } from '@/shared/types';
 import {
   ensureOriginPermission,
@@ -16,9 +16,22 @@ export function App() {
   const [draft, setDraft] = useState<DraftDocument | null>(null);
   const [pickerActive, setPickerActive] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [noteInput, setNoteInput] = useState('');
-  const [noteLabelInput, setNoteLabelInput] = useState('');
-  const dragItemId = useRef<string | null>(null);
+  const currentTabIdRef = useRef<number | null>(null);
+  const pickerActiveRef = useRef(false);
+  const lifecyclePortRef = useRef<chrome.runtime.Port | null>(null);
+
+  const publishLifecycleState = useCallback(
+    (
+      nextTabId: number | null = currentTabIdRef.current,
+      nextPickerActive: boolean = pickerActiveRef.current,
+    ): void => {
+      lifecyclePortRef.current?.postMessage({
+        tabId: nextTabId,
+        pickerActive: nextPickerActive,
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -31,13 +44,14 @@ export function App() {
       }
 
       setCurrentTabId(tabId);
-      if (unsubscribeDraft != null) {
-        unsubscribeDraft();
-      }
+      currentTabIdRef.current = tabId;
+      unsubscribeDraft?.();
 
       if (tabId == null) {
         setDraft(null);
         setPickerActive(false);
+        pickerActiveRef.current = false;
+        publishLifecycleState(null, false);
         return;
       }
 
@@ -48,6 +62,8 @@ export function App() {
 
       setDraft(result.draft);
       setPickerActive(result.active);
+      pickerActiveRef.current = result.active;
+      publishLifecycleState(tabId, result.active);
       unsubscribeDraft = subscribeToDraftChanges(tabId, (nextDraft) => {
         setDraft(nextDraft);
       });
@@ -63,10 +79,57 @@ export function App() {
       unsubscribeDraft?.();
       unsubscribeTabs();
     };
+  }, [publishLifecycleState]);
+
+  useEffect(() => {
+    const port = chrome.runtime.connect({ name: 'sidepanel-lifecycle' });
+    lifecyclePortRef.current = port;
+
+    return () => {
+      lifecyclePortRef.current = null;
+      port.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    currentTabIdRef.current = currentTabId;
+    publishLifecycleState(currentTabId, pickerActiveRef.current);
+  }, [currentTabId, publishLifecycleState]);
+
+  useEffect(() => {
+    pickerActiveRef.current = pickerActive;
+    publishLifecycleState(currentTabIdRef.current, pickerActive);
+  }, [pickerActive, publishLifecycleState]);
+
+  useEffect(() => {
+    const stopPickerOnTeardown = () => {
+      const tabId = currentTabIdRef.current;
+      if (tabId == null || !pickerActiveRef.current) {
+        return;
+      }
+
+      void chrome.runtime.sendMessage({ type: 'STOP_PICKER', tabId });
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        stopPickerOnTeardown();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', stopPickerOnTeardown);
+    window.addEventListener('beforeunload', stopPickerOnTeardown);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', stopPickerOnTeardown);
+      window.removeEventListener('beforeunload', stopPickerOnTeardown);
+      stopPickerOnTeardown();
+    };
   }, []);
 
   const markdown = useMemo(() => generateMarkdown(draft), [draft]);
-  const includeContextEnabled = draft?.includeContext === true;
+  const previewBlocks = useMemo(() => buildMarkdownPreviewBlocks(draft), [draft]);
 
   async function requireTabId(): Promise<number> {
     if (currentTabId == null) {
@@ -89,17 +152,8 @@ export function App() {
     <SidepanelView
       currentTabId={currentTabId}
       draft={draft}
-      includeContextEnabled={includeContextEnabled}
       markdown={markdown}
-      noteInput={noteInput}
-      noteLabelInput={noteLabelInput}
-      onClearDraft={() => {
-        void perform(async () => {
-          const tabId = await requireTabId();
-          await request<{ draft: DraftDocument | null }>({ type: 'CLEAR_DRAFT', tabId });
-          setDraft(null);
-        }, 'Draft limpio.');
-      }}
+      previewBlocks={previewBlocks}
       onCopyMarkdown={() => {
         void perform(async () => {
           const tabId = await requireTabId();
@@ -107,22 +161,7 @@ export function App() {
           await navigator.clipboard.writeText(result.markdown);
         }, 'Markdown copiado al portapapeles.');
       }}
-      onToggleContext={() => {
-        void perform(
-          async () => {
-            const tabId = await requireTabId();
-            const result = await request<{ draft: DraftDocument }>({
-              type: 'TOGGLE_CONTEXT',
-              tabId,
-            });
-            setDraft(result.draft);
-          },
-          includeContextEnabled
-            ? 'Contexto removido del Markdown.'
-            : 'Contexto agregado al Markdown.',
-        );
-      }}
-      onDeleteItem={(itemId) => {
+      onRemoveSelection={(itemId) => {
         void perform(async () => {
           const tabId = await requireTabId();
           const result = await request<{ draft: DraftDocument | null }>({
@@ -131,70 +170,21 @@ export function App() {
             itemId,
           });
           setDraft(result.draft);
-        });
+        }, 'Bloque eliminado.');
       }}
-      onDragStart={(itemId) => {
-        dragItemId.current = itemId;
-      }}
-      onDrop={(targetId) => {
+      onRestartExtraction={() => {
         void perform(async () => {
           const tabId = await requireTabId();
-          const sourceId = dragItemId.current;
-          if (sourceId == null || draft == null || sourceId === targetId) {
-            return;
-          }
-
-          const orderedIds = draft.items.map((item) => item.id);
-          const sourceIndex = orderedIds.indexOf(sourceId);
-          const targetIndex = orderedIds.indexOf(targetId);
-          if (sourceIndex === -1 || targetIndex === -1) {
-            return;
-          }
-
-          orderedIds.splice(sourceIndex, 1);
-          orderedIds.splice(targetIndex, 0, sourceId);
-
-          const result = await request<{ draft: DraftDocument }>({
-            type: 'REORDER_SELECTIONS',
+          await ensureOriginPermission(tabId);
+          const result = await request<{ active: boolean; draft: DraftDocument }>({
+            type: 'RESTART_EXTRACTION',
             tabId,
-            orderedIds,
           });
+          setPickerActive(result.active);
+          pickerActiveRef.current = result.active;
+          publishLifecycleState(tabId, result.active);
           setDraft(result.draft);
-          dragItemId.current = null;
-        });
-      }}
-      onLabelChange={(itemId, value) => {
-        void perform(async () => {
-          const tabId = await requireTabId();
-          const result = await request<{ draft: DraftDocument }>({
-            type: 'UPDATE_SELECTION_LABEL',
-            tabId,
-            itemId,
-            label: value,
-          });
-          setDraft(result.draft);
-        });
-      }}
-      onNoteInputChange={setNoteInput}
-      onNoteLabelInputChange={setNoteLabelInput}
-      onSaveNote={() => {
-        void perform(async () => {
-          const tabId = await requireTabId();
-          if (noteInput.trim().length === 0) {
-            throw new Error('La nota no puede estar vacia.');
-          }
-
-          const result = await request<{ draft: DraftDocument }>({
-            type: 'UPSERT_NOTE',
-            tabId,
-            text: noteInput,
-            label: noteLabelInput || undefined,
-            url: draft?.url ?? 'https://captura.local/notas',
-          });
-          setDraft(result.draft);
-          setNoteInput('');
-          setNoteLabelInput('');
-        }, 'Nota guardada.');
+        }, 'Extracción reiniciada.');
       }}
       onTogglePicker={() => {
         void perform(
@@ -203,16 +193,22 @@ export function App() {
             if (pickerActive) {
               await request<{ active: boolean }>({ type: 'STOP_PICKER', tabId });
               setPickerActive(false);
+              pickerActiveRef.current = false;
+              publishLifecycleState(tabId, false);
               return;
             }
 
             await ensureOriginPermission(tabId);
-            await request<{ active: boolean }>({ type: 'START_PICKER', tabId });
-            setPickerActive(true);
+            const result = await request<{ active: boolean; draft: DraftDocument | null }>({
+              type: 'START_PICKER',
+              tabId,
+            });
+            setPickerActive(result.active);
+            pickerActiveRef.current = result.active;
+            publishLifecycleState(tabId, result.active);
+            setDraft(result.draft);
           },
-          pickerActive
-            ? 'Picker pausado.'
-            : 'Picker activo. Vuelve a la pagina y haz click o drag.',
+          pickerActive ? 'Extracción pausada.' : 'Extracción lista.',
         );
       }}
       pickerActive={pickerActive}

@@ -1,6 +1,157 @@
 import { createId } from '@/shared/id';
 import { normalizeOptionalText, normalizeText } from '@/shared/selectionUtils';
-import type { DraftAction, DraftDocument, PageContextPayload, SelectionItem } from '@/shared/types';
+import type {
+  DraftAction,
+  DraftDocument,
+  PageContextPayload,
+  SelectionBlock,
+  SelectionFormat,
+  SelectionItem,
+} from '@/shared/types';
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value != null;
+}
+
+export function deriveSelectionKey(
+  format: SelectionFormat,
+  selectorHint: string | undefined,
+): string | undefined {
+  return selectorHint == null ? undefined : `${format}:${selectorHint}`;
+}
+
+export function blockKeyFromItem(item: SelectionItem): string {
+  if (item.kind === 'note') {
+    return item.id;
+  }
+
+  return item.selectionKey ?? deriveSelectionKey(item.format, item.selectorHint) ?? item.id;
+}
+
+function compareOrderKeys(left: SelectionItem, right: SelectionItem): number {
+  if (left.orderKey == null && right.orderKey == null) {
+    return 0;
+  }
+  if (left.orderKey == null) {
+    return 1;
+  }
+  if (right.orderKey == null) {
+    return -1;
+  }
+
+  return left.orderKey.localeCompare(right.orderKey);
+}
+
+function buildItemsSnapshot(
+  blocksByKey: Record<string, SelectionBlock>,
+  orderedKeys: string[],
+): SelectionItem[] {
+  return orderedKeys
+    .map((key) => blocksByKey[key])
+    .filter((item): item is SelectionItem => item != null);
+}
+
+function materializeDraft(draft: DraftDocument): DraftDocument {
+  const nextOrderedKeys = draft.orderedKeys.filter((key) => draft.blocksByKey[key] != null);
+  return {
+    ...draft,
+    orderedKeys: nextOrderedKeys,
+    items: buildItemsSnapshot(draft.blocksByKey, nextOrderedKeys),
+  };
+}
+
+function sortKeysByOrder(
+  orderedKeys: string[],
+  blocksByKey: Record<string, SelectionBlock>,
+): string[] {
+  return orderedKeys.slice().sort((leftKey, rightKey) => {
+    const left = blocksByKey[leftKey];
+    const right = blocksByKey[rightKey];
+    if (left == null && right == null) {
+      return 0;
+    }
+    if (left == null) {
+      return 1;
+    }
+    if (right == null) {
+      return -1;
+    }
+
+    return compareOrderKeys(left, right);
+  });
+}
+
+function mergeOrderedKeysPreservingBatch(
+  currentOrderedKeys: string[],
+  nextKeys: string[],
+): string[] {
+  const seen = new Set(currentOrderedKeys);
+  const orderedKeys = currentOrderedKeys.slice();
+
+  nextKeys.forEach((key) => {
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    orderedKeys.push(key);
+  });
+
+  return orderedKeys;
+}
+
+function draftFromLegacyItems(
+  input: Omit<DraftDocument, 'blocksByKey' | 'orderedKeys' | 'items'> & {
+    blocksByKey?: Record<string, SelectionBlock>;
+    orderedKeys?: string[];
+    items?: SelectionItem[];
+  },
+): DraftDocument {
+  const legacyItems = input.items ?? [];
+  const blocksByKey = legacyItems.reduce<Record<string, SelectionBlock>>((accumulator, item) => {
+    accumulator[blockKeyFromItem(item)] = item;
+    return accumulator;
+  }, {});
+  const orderedKeys = legacyItems.map(blockKeyFromItem);
+
+  return materializeDraft({
+    ...input,
+    blocksByKey,
+    orderedKeys,
+    items: legacyItems,
+  });
+}
+
+export function normalizeDraftDocument(draft: DraftDocument | null): DraftDocument | null {
+  if (draft == null) {
+    return null;
+  }
+
+  if (
+    !isObject(draft) ||
+    !isObject(draft.metadata) ||
+    !Array.isArray(draft.items) ||
+    typeof draft.url !== 'string'
+  ) {
+    throw new Error('El draft persistido tiene una forma invalida.');
+  }
+
+  const maybeBlocksByKey = 'blocksByKey' in draft ? draft.blocksByKey : undefined;
+  const maybeOrderedKeys = 'orderedKeys' in draft ? draft.orderedKeys : undefined;
+  if (!isObject(maybeBlocksByKey) || !Array.isArray(maybeOrderedKeys)) {
+    return draftFromLegacyItems(draft);
+  }
+
+  return materializeDraft(draft);
+}
+
+export function getOrderedItems(draft: DraftDocument | null): SelectionItem[] {
+  if (draft == null) {
+    return [];
+  }
+
+  return buildItemsSnapshot(draft.blocksByKey, draft.orderedKeys);
+}
 
 export function createEmptyDraft(
   pageContext: PageContextPayload,
@@ -18,6 +169,8 @@ export function createEmptyDraft(
       title: pageContext.metadata.title ?? pageContext.pageTitle,
       ...pageContext.metadata,
     },
+    blocksByKey: {},
+    orderedKeys: [],
     items: [],
     updatedAt: now,
   };
@@ -44,38 +197,85 @@ function updateMetadata(
   };
 }
 
-function reorderItems(items: SelectionItem[], orderedIds: string[]): SelectionItem[] {
-  if (orderedIds.length !== items.length) {
-    return items;
+function reorderItems(draft: DraftDocument, orderedIds: string[]): DraftDocument {
+  if (orderedIds.length !== draft.orderedKeys.length) {
+    return draft;
   }
 
-  const itemMap = new Map(items.map((item) => [item.id, item]));
-  const reordered = orderedIds
-    .map((itemId) => itemMap.get(itemId))
-    .filter((item): item is SelectionItem => item != null);
+  const keyById = new Map(
+    Object.entries(draft.blocksByKey).map(([key, item]) => [item.id, key] as const),
+  );
+  const reorderedKeys = orderedIds
+    .map((itemId) => keyById.get(itemId))
+    .filter((key): key is string => key != null);
 
-  return reordered.length === items.length ? reordered : items;
+  if (reorderedKeys.length !== draft.orderedKeys.length) {
+    return draft;
+  }
+
+  return materializeDraft({
+    ...draft,
+    orderedKeys: reorderedKeys,
+  });
 }
 
-function appendUniqueItems(
-  currentItems: SelectionItem[],
-  nextItems: SelectionItem[],
-): SelectionItem[] {
-  const existing = new Set(
-    currentItems.map((item) => `${item.format}:${normalizeText(item.text)}:${item.imageUrl ?? ''}`),
-  );
+function upsertSelectionBlock(
+  draft: DraftDocument,
+  item: SelectionItem,
+  options: { preserveBatchOrder: boolean },
+): DraftDocument {
+  const key = blockKeyFromItem(item);
+  const blocksByKey = {
+    ...draft.blocksByKey,
+    [key]: item,
+  };
+  const alreadyIncluded = draft.orderedKeys.includes(key);
+  const orderedKeys = alreadyIncluded
+    ? draft.orderedKeys.slice()
+    : options.preserveBatchOrder
+      ? [...draft.orderedKeys, key]
+      : sortKeysByOrder([...draft.orderedKeys, key], blocksByKey);
 
-  const deduped = nextItems.filter((item) => {
-    const signature = `${item.format}:${normalizeText(item.text)}:${item.imageUrl ?? ''}`;
-    if (existing.has(signature)) {
-      return false;
-    }
+  return materializeDraft({
+    ...draft,
+    blocksByKey,
+    orderedKeys,
+  });
+}
 
-    existing.add(signature);
-    return true;
+function appendUniqueItems(draft: DraftDocument, nextItems: SelectionItem[]): DraftDocument {
+  const blocksByKey = { ...draft.blocksByKey };
+  const nextKeys: string[] = [];
+
+  nextItems.forEach((item) => {
+    const key = blockKeyFromItem(item);
+    blocksByKey[key] = item;
+    nextKeys.push(key);
   });
 
-  return [...currentItems, ...deduped];
+  return materializeDraft({
+    ...draft,
+    blocksByKey,
+    orderedKeys: mergeOrderedKeysPreservingBatch(draft.orderedKeys, nextKeys),
+  });
+}
+
+function removeSelectionById(draft: DraftDocument, itemId: string): DraftDocument {
+  const matchingEntry = Object.entries(draft.blocksByKey).find(
+    ([key, item]) => key === itemId || item.id === itemId,
+  );
+  if (matchingEntry == null) {
+    return draft;
+  }
+
+  const [blockKey] = matchingEntry;
+  const { [blockKey]: _removed, ...remainingBlocks } = draft.blocksByKey;
+
+  return materializeDraft({
+    ...draft,
+    blocksByKey: remainingBlocks,
+    orderedKeys: draft.orderedKeys.filter((key) => key !== blockKey),
+  });
 }
 
 export function reduceDraft(
@@ -87,16 +287,17 @@ export function reduceDraft(
     return null;
   }
 
+  const normalizedCurrent = normalizeDraftDocument(current);
   const pageContext =
     fallbackPageContext ??
-    (current == null
+    (normalizedCurrent == null
       ? undefined
       : {
-          url: current.url,
-          origin: current.origin,
-          pageTitle: current.pageTitle,
-          siteName: current.siteName,
-          metadata: current.metadata,
+          url: normalizedCurrent.url,
+          origin: normalizedCurrent.origin,
+          pageTitle: normalizedCurrent.pageTitle,
+          siteName: normalizedCurrent.siteName,
+          metadata: normalizedCurrent.metadata,
         });
 
   if (pageContext == null) {
@@ -104,49 +305,61 @@ export function reduceDraft(
   }
 
   const draft =
-    current ??
+    normalizedCurrent ??
     createEmptyDraft(pageContext, action.type === 'upsertNote' ? action.tabId : 0, action.now);
 
   switch (action.type) {
     case 'mergePageContext':
       return updateMetadata(
-        current ?? createEmptyDraft(action.payload, draft.tabId, action.now),
+        normalizedCurrent ?? createEmptyDraft(action.payload, draft.tabId, action.now),
         action.payload,
         action.now,
       );
     case 'addSelection':
       return {
-        ...updateMetadata(draft, pageContext, action.now),
-        items: [...draft.items, action.payload],
+        ...upsertSelectionBlock(updateMetadata(draft, pageContext, action.now), action.payload, {
+          preserveBatchOrder: false,
+        }),
+        updatedAt: action.now,
       };
     case 'addSelections':
       return {
-        ...updateMetadata(draft, pageContext, action.now),
-        items: appendUniqueItems(draft.items, action.payload),
+        ...appendUniqueItems(updateMetadata(draft, pageContext, action.now), action.payload),
+        updatedAt: action.now,
       };
     case 'removeSelection':
       return {
-        ...draft,
-        items: draft.items.filter((item) => item.id !== action.itemId),
+        ...removeSelectionById(draft, action.itemId),
         updatedAt: action.now,
       };
-    case 'updateSelectionLabel':
-      return {
+    case 'updateSelectionLabel': {
+      const matchingEntry = Object.entries(draft.blocksByKey).find(
+        ([key, item]) => key === action.itemId || item.id === action.itemId,
+      );
+
+      if (matchingEntry == null) {
+        return {
+          ...draft,
+          updatedAt: action.now,
+        };
+      }
+
+      const [blockKey, item] = matchingEntry;
+      return materializeDraft({
         ...draft,
-        items: draft.items.map((item) =>
-          item.id === action.itemId
-            ? {
-                ...item,
-                label: normalizeOptionalText(action.label),
-              }
-            : item,
-        ),
+        blocksByKey: {
+          ...draft.blocksByKey,
+          [blockKey]: {
+            ...item,
+            label: normalizeOptionalText(action.label),
+          },
+        },
         updatedAt: action.now,
-      };
+      });
+    }
     case 'reorderSelections':
       return {
-        ...draft,
-        items: reorderItems(draft.items, action.orderedIds),
+        ...reorderItems(draft, action.orderedIds),
         updatedAt: action.now,
       };
     case 'toggleIncludeContext':
@@ -158,35 +371,30 @@ export function reduceDraft(
     case 'upsertNote': {
       const normalizedText = normalizeText(action.text);
       const normalizedLabel = normalizeOptionalText(action.label);
-      const existingIndex =
-        action.noteId == null ? -1 : draft.items.findIndex((item) => item.id === action.noteId);
+      const noteKey = action.noteId ?? createId('note');
+      const existingItem = draft.blocksByKey[noteKey];
       const nextItem: SelectionItem = {
-        id: action.noteId ?? createId('note'),
+        id: noteKey,
         tabId: action.tabId,
         url: action.url,
         kind: 'note',
         format: 'note',
         label: normalizedLabel,
         text: normalizedText,
-        createdAt:
-          existingIndex >= 0 ? (draft.items[existingIndex]?.createdAt ?? action.now) : action.now,
+        createdAt: existingItem?.createdAt ?? action.now,
       };
 
-      if (existingIndex >= 0) {
-        const items = draft.items.slice();
-        items[existingIndex] = nextItem;
-        return {
-          ...draft,
-          items,
-          updatedAt: action.now,
-        };
-      }
-
-      return {
+      return materializeDraft({
         ...draft,
-        items: [...draft.items, nextItem],
+        blocksByKey: {
+          ...draft.blocksByKey,
+          [noteKey]: nextItem,
+        },
+        orderedKeys: draft.orderedKeys.includes(noteKey)
+          ? draft.orderedKeys
+          : [...draft.orderedKeys, noteKey],
         updatedAt: action.now,
-      };
+      });
     }
     default:
       return draft;

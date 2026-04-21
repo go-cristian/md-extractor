@@ -1,4 +1,12 @@
+import { getOrderedItems } from '@/shared/draft';
 import type { DraftDocument, SelectionItem, SelectionTable } from '@/shared/types';
+
+export interface MarkdownPreviewBlock {
+  key: string;
+  itemId?: string | undefined;
+  markdown: string;
+  removable: boolean;
+}
 
 function defaultHeading(item: SelectionItem, index: number): string {
   if (item.format === 'note') {
@@ -99,26 +107,43 @@ function renderContext(draft: DraftDocument): string[] {
   return lines;
 }
 
+export function buildMarkdownPreviewBlocks(draft: DraftDocument | null): MarkdownPreviewBlock[] {
+  if (draft == null) {
+    return [];
+  }
+
+  const sections: MarkdownPreviewBlock[] = [];
+  if (draft.includeContext === true) {
+    sections.push({
+      key: 'context',
+      markdown: renderContext(draft).join('\n'),
+      removable: false,
+    });
+  }
+
+  getOrderedItems(draft).forEach((item, index) => {
+    const markdown = renderItem(item, index);
+    if (markdown.length === 0) {
+      return;
+    }
+
+    sections.push({
+      key: item.id,
+      itemId: item.id,
+      markdown,
+      removable: true,
+    });
+  });
+
+  return sections;
+}
+
 export function generateMarkdown(draft: DraftDocument | null): string {
   if (draft == null) {
     return '# Sin contenido\n\nActiva el picker y agrega selecciones para construir el Markdown.';
   }
 
-  const sections: string[] = [];
-
-  if (draft.includeContext === true) {
-    sections.push(renderContext(draft).join('\n'));
-  }
-
-  if (draft.items.length === 0) {
-    return sections.length > 0 ? sections.join('\n\n').trim() : 'Aun no hay selecciones guardadas.';
-  }
-
-  sections.push(
-    ...draft.items
-      .map((item, index) => renderItem(item, index))
-      .filter((section) => section.length > 0),
-  );
+  const sections = buildMarkdownPreviewBlocks(draft).map((block) => block.markdown);
 
   if (sections.length === 0) {
     return 'Aun no hay selecciones guardadas.';

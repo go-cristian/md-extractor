@@ -1,3 +1,4 @@
+import { normalizeDraftDocument } from '@/shared/draft';
 import type { DraftDocument } from '@/shared/types';
 
 const draftKeyPrefix = 'draft:';
@@ -14,12 +15,12 @@ export function getPickerStorageKey(tabId: number): string {
 export async function readDraft(tabId: number): Promise<DraftDocument | null> {
   const key = getDraftStorageKey(tabId);
   const result = await chrome.storage.session.get(key);
-  return (result[key] as DraftDocument | undefined) ?? null;
+  return normalizeDraftDocument((result[key] as DraftDocument | undefined) ?? null);
 }
 
 export async function writeDraft(tabId: number, draft: DraftDocument): Promise<void> {
   await chrome.storage.session.set({
-    [getDraftStorageKey(tabId)]: draft,
+    [getDraftStorageKey(tabId)]: normalizeDraftDocument(draft),
   });
 }
 

@@ -20,6 +20,12 @@ No contiene UI React ni lógica de render de Markdown.
 - Mantener handlers pequeños y mover lógica pura a `src/shared/`.
 - La resíncronización del picker sobre la página activa debe hacerse con `chrome.scripting.executeScript` y `runPickerAction`, para reutilizar el runtime inyectado.
 - Los toggles persistidos del draft, como `includeContext`, se resuelven en background y se guardan por pestaña igual que el resto del documento.
+- El background debe tratar `selectionKey` como identidad canónica de los bloques activos; no volver a deducir igualdad por texto normalizado ni por ids efímeros.
+- Para cualquier operación derivada del contenido activo del draft, iterar el orden explícito (`orderedKeys` materializado) en vez de asumir que `draft.items` es la única fuente de verdad.
+- `START_PICKER` es también la puerta de entrada de la autoextracción: si no hay draft curado para la URL actual, debe sembrarlo antes de dejar el picker activo.
+- `RESTART_EXTRACTION` siempre regenera el draft desde cero para la página actual; `CLEAR_DRAFT` solo borra estado y highlights, sin volver a extraer.
+- `STOP_PICKER` debe comportarse como shutdown visual del runtime inyectado: limpiar overlay/cursor/highlights de la página, pero preservar el draft persistido.
+- Cuando exista un registry de perfiles por sitio, el background debe pasar esos perfiles serializables al picker inyectado como argumentos de `executeScript`, no asumir que el runtime inyectado puede resolver imports externos.
 
 ## Usage
 

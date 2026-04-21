@@ -1,5 +1,12 @@
 import { runPickerAction } from '@/content/injectPicker';
-import { reduceDraft } from '@/shared/draft';
+import {
+  blockKeyFromItem,
+  createEmptyDraft,
+  deriveSelectionKey,
+  getOrderedItems,
+  reduceDraft,
+} from '@/shared/draft';
+import { siteExtractionProfiles } from '@/shared/extractionProfiles';
 import { createId } from '@/shared/id';
 import { generateMarkdown } from '@/shared/markdown';
 import { normalizeText } from '@/shared/selectionUtils';
@@ -24,6 +31,16 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function captureAccessError(message: string, actionLabel: string): Error {
+  if (message.includes('Cannot access contents of url')) {
+    return new Error(
+      `MD Extractor no tiene permiso para este sitio. ${actionLabel} de nuevo y concede acceso al dominio.`,
+    );
+  }
+
+  return new Error(message);
+}
+
 async function setupSidepanel(): Promise<void> {
   await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
   await chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
@@ -35,6 +52,42 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(() => {
   void setupSidepanel();
+});
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'sidepanel-lifecycle') {
+    return;
+  }
+
+  let trackedTabId: number | null = null;
+  let trackedPickerActive = false;
+
+  port.onMessage.addListener((message: unknown) => {
+    if (typeof message !== 'object' || message == null) {
+      return;
+    }
+
+    const hasTabId = 'tabId' in message;
+    const maybeActive =
+      'pickerActive' in message && typeof message.pickerActive === 'boolean'
+        ? message.pickerActive
+        : undefined;
+
+    if (hasTabId) {
+      trackedTabId = typeof message.tabId === 'number' ? message.tabId : null;
+    }
+    if (maybeActive != null) {
+      trackedPickerActive = maybeActive;
+    }
+  });
+
+  port.onDisconnect.addListener(() => {
+    if (trackedTabId == null || !trackedPickerActive) {
+      return;
+    }
+
+    void handleStopPicker(trackedTabId);
+  });
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -67,28 +120,43 @@ async function ensureDraft(pageContext: PageContextPayload, tabId: number): Prom
   return withTabId;
 }
 
-async function handleStartPicker(tabId: number): Promise<ExtensionResponse<{ active: boolean }>> {
+async function activatePickerRuntime(tabId: number, draft: DraftDocument | null): Promise<void> {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
       func: runPickerAction,
-      args: ['activate'],
+      args: ['activate', highlightPayloadFromDraft(draft)],
     });
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : 'No fue posible activar el picker en la pagina.';
-
-    if (message.includes('Cannot access contents of url')) {
-      throw new Error(
-        'MD Extractor no tiene permiso para este sitio. Activa el picker de nuevo y concede acceso al dominio.',
-      );
-    }
-
-    throw error;
+      error instanceof Error ? error.message : 'No fue posible activar la extracción en la pagina.';
+    throw captureAccessError(message, 'Activa la extracción');
   }
+}
+
+async function handleStartPicker(
+  tabId: number,
+): Promise<ExtensionResponse<{ active: boolean; draft: DraftDocument | null }>> {
+  const [existingDraft, tab] = await Promise.all([readDraft(tabId), chrome.tabs.get(tabId)]);
+  const currentUrl = tab.url;
+
+  let nextDraft = existingDraft;
+  const shouldAutoCapture =
+    currentUrl != null &&
+    (existingDraft == null ||
+      existingDraft.url !== currentUrl ||
+      getOrderedItems(existingDraft).length === 0);
+
+  if (shouldAutoCapture) {
+    nextDraft = await captureDocumentToDraft(tabId, {
+      existingDraft,
+      overwrite: true,
+    });
+  }
+
+  await activatePickerRuntime(tabId, nextDraft);
   await writePickerState(tabId, true);
-  await syncPickerHighlights(tabId, await readDraft(tabId));
-  return { ok: true, data: { active: true } };
+  return { ok: true, data: { active: true, draft: nextDraft } };
 }
 
 async function handleStopPicker(tabId: number): Promise<ExtensionResponse<{ active: boolean }>> {
@@ -120,6 +188,7 @@ function toSelectionItem(
     selectionKey: selectionKeyFromCapture(selection),
     label: selection.label,
     text: normalizeText(selection.text),
+    orderKey: selection.orderKey,
     htmlSnippet: selection.htmlSnippet,
     imageUrl: selection.imageUrl,
     selectorHint: selection.selectorHint,
@@ -135,7 +204,7 @@ function derivedSelectionKey(
   format: SelectionFormat,
   selectorHint: string | undefined,
 ): string | undefined {
-  return selectorHint == null ? undefined : `${format}:${selectorHint}`;
+  return deriveSelectionKey(format, selectorHint);
 }
 
 function selectionKeyFromCapture(selection: SelectionCapturePayload): string | undefined {
@@ -147,7 +216,7 @@ function selectionKeyFromItem(item: SelectionItem): string | undefined {
     return undefined;
   }
 
-  return item.selectionKey ?? derivedSelectionKey(item.format, item.selectorHint);
+  return blockKeyFromItem(item);
 }
 
 function highlightPayloadFromDraft(
@@ -157,7 +226,7 @@ function highlightPayloadFromDraft(
     return [];
   }
 
-  return draft.items.flatMap((item) => {
+  return getOrderedItems(draft).flatMap((item) => {
     const selectionKey = selectionKeyFromItem(item);
     if (selectionKey == null || item.selectorHint == null) {
       return [];
@@ -179,61 +248,123 @@ async function syncPickerHighlights(tabId: number, draft: DraftDocument | null):
   }
 }
 
-async function handleCapturePrimaryContent(
-  tabId: number,
-): Promise<ExtensionResponse<{ draft: DraftDocument; captured: number }>> {
+async function captureDocument(tabId: number): Promise<{
+  pageContext: PageContextPayload;
+  selections: SelectionCapturePayload[];
+}> {
   let scriptResults: chrome.scripting.InjectionResult<ReturnType<typeof runPickerAction>>[];
 
   try {
     scriptResults = await chrome.scripting.executeScript({
       target: { tabId },
       func: runPickerAction,
-      args: ['capturePrimary'],
+      args: ['captureDocument', [], siteExtractionProfiles],
     });
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : 'No fue posible capturar el contenido principal.';
-
-    if (message.includes('Cannot access contents of url')) {
-      throw new Error(
-        'MD Extractor no tiene permiso para este sitio. Usa Capturar principal de nuevo y concede acceso al dominio.',
-      );
-    }
-
-    throw error;
+      error instanceof Error ? error.message : 'No fue posible capturar el contenido de la pagina.';
+    throw captureAccessError(message, 'Activa la extracción');
   }
 
   const capture = scriptResults[0]?.result;
   if (capture == null) {
-    throw new Error('No fue posible leer el contenido principal de la pagina.');
+    throw new Error('No fue posible leer el contenido de la pagina.');
   }
 
-  const baseDraft = await ensureDraft(capture.pageContext, tabId);
+  return capture;
+}
+
+async function buildCapturedDraft(
+  tabId: number,
+  capture: { pageContext: PageContextPayload; selections: SelectionCapturePayload[] },
+  existingDraft: DraftDocument | null,
+): Promise<DraftDocument> {
+  const now = nowIso();
+  const baseDraft = createEmptyDraft(capture.pageContext, tabId, now);
+  baseDraft.includeContext = existingDraft?.includeContext ?? false;
   const nextItems = capture.selections.map((selection: SelectionCapturePayload) =>
     toSelectionItem(tabId, capture.pageContext, selection),
   );
-  const nextDraft =
-    nextItems.length === 0
-      ? baseDraft
-      : reduceDraft(
-          baseDraft,
-          {
-            type: 'addSelections',
-            payload: nextItems,
-            now: nowIso(),
-          },
-          capture.pageContext,
-        );
+  const nextDraft = reduceDraft(
+    baseDraft,
+    {
+      type: 'addSelections',
+      payload: nextItems,
+      now,
+    },
+    capture.pageContext,
+  );
 
   if (nextDraft == null) {
-    throw new Error('No fue posible guardar la captura principal.');
+    throw new Error('No fue posible guardar la extracción automatica.');
   }
 
+  return {
+    ...nextDraft,
+    tabId,
+  };
+}
+
+async function captureDocumentToDraft(
+  tabId: number,
+  options: { existingDraft?: DraftDocument | null; overwrite: boolean },
+): Promise<DraftDocument> {
+  const capture = await captureDocument(tabId);
+  const existingDraft = options.existingDraft ?? (await readDraft(tabId));
+
+  if (!options.overwrite) {
+    const baseDraft = await ensureDraft(capture.pageContext, tabId);
+    const nextItems = capture.selections.map((selection) =>
+      toSelectionItem(tabId, capture.pageContext, selection),
+    );
+    const nextDraft = reduceDraft(
+      baseDraft,
+      {
+        type: 'addSelections',
+        payload: nextItems,
+        now: nowIso(),
+      },
+      capture.pageContext,
+    );
+
+    if (nextDraft == null) {
+      throw new Error('No fue posible guardar la extracción automatica.');
+    }
+
+    await writeDraft(tabId, nextDraft);
+    return nextDraft;
+  }
+
+  const nextDraft = await buildCapturedDraft(tabId, capture, existingDraft);
   await writeDraft(tabId, nextDraft);
+  return nextDraft;
+}
+
+async function handleRestartExtraction(
+  tabId: number,
+): Promise<ExtensionResponse<{ active: boolean; draft: DraftDocument }>> {
+  const existingDraft = await readDraft(tabId);
+  const nextDraft = await captureDocumentToDraft(tabId, {
+    existingDraft,
+    overwrite: true,
+  });
+  await activatePickerRuntime(tabId, nextDraft);
+  await writePickerState(tabId, true);
+  return response({ active: true, draft: nextDraft });
+}
+
+async function handleCapturePrimaryContent(
+  tabId: number,
+): Promise<ExtensionResponse<{ draft: DraftDocument; captured: number }>> {
+  const existingDraft = await readDraft(tabId);
+  const nextDraft = await captureDocumentToDraft(tabId, {
+    existingDraft,
+    overwrite: true,
+  });
   await syncPickerHighlights(tabId, nextDraft);
   return response({
     draft: nextDraft,
-    captured: Math.max(0, nextDraft.items.length - baseDraft.items.length),
+    captured: getOrderedItems(nextDraft).length,
   });
 }
 
@@ -257,6 +388,9 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
           return;
         case 'STOP_PICKER':
           sendResponse(await handleStopPicker(message.tabId));
+          return;
+        case 'RESTART_EXTRACTION':
+          sendResponse(await handleRestartExtraction(message.tabId));
           return;
         case 'CAPTURE_PRIMARY_CONTENT':
           sendResponse(await handleCapturePrimaryContent(message.tabId));
@@ -410,11 +544,12 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
           }
 
           const baseDraft = await ensureDraft(message.pageContext, tabId);
+          const orderedItems = getOrderedItems(baseDraft);
           const selectionKey = selectionKeyFromCapture(message.selection);
           const existingItem =
             selectionKey == null
               ? undefined
-              : baseDraft.items.find((item) => selectionKeyFromItem(item) === selectionKey);
+              : orderedItems.find((item) => selectionKeyFromItem(item) === selectionKey);
 
           const nextDraft =
             existingItem == null
@@ -459,6 +594,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
             url: message.pageContext.url,
             kind: message.selection.kind,
             format: message.selection.format,
+            orderKey: message.selection.orderKey,
             selectionKey: selectionKeyFromCapture(message.selection),
             label: message.selection.label,
             text: normalizeText(message.selection.text),

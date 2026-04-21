@@ -22,6 +22,7 @@ export interface SelectionItem {
   url: string;
   kind: SelectionKind;
   format: SelectionFormat;
+  orderKey?: string | undefined;
   selectionKey?: string | undefined;
   label?: string | undefined;
   text: string;
@@ -35,6 +36,8 @@ export interface SelectionItem {
   createdAt: string;
 }
 
+export type SelectionBlock = SelectionItem;
+
 export interface DraftDocument {
   tabId: number;
   url: string;
@@ -43,6 +46,8 @@ export interface DraftDocument {
   siteName: string;
   includeContext?: boolean | undefined;
   metadata: PageMetadata;
+  blocksByKey: Record<string, SelectionBlock>;
+  orderedKeys: string[];
   items: SelectionItem[];
   updatedAt: string;
 }
@@ -51,6 +56,36 @@ export interface SiteAdapter {
   id: string;
   matches(url: URL, document: Document): boolean;
   extractMetadata(document: Document): Partial<PageMetadata>;
+}
+
+export interface RevealStep {
+  type: 'click';
+  selector?: string | undefined;
+  text?: string | undefined;
+  label: string;
+  optional?: boolean | undefined;
+  revealSelectors?: string[] | undefined;
+}
+
+export interface ExtractionBlockConfig {
+  type: 'heading' | 'paragraph' | 'list' | 'table' | 'image';
+  selectors: string[];
+  headingLevel?: number | undefined;
+}
+
+export interface SiteExtractionProfile {
+  id: string;
+  hostnames?: string[] | undefined;
+  signals?: string[] | undefined;
+  anchorSelectors?: string[] | undefined;
+  reveal?: RevealStep[] | undefined;
+  blocks: ExtractionBlockConfig[];
+}
+
+export interface ExtractionProfileResult {
+  profileId: string;
+  revealApplied: boolean;
+  selections: SelectionCapturePayload[];
 }
 
 export interface PageContextPayload {
@@ -64,6 +99,7 @@ export interface PageContextPayload {
 export interface SelectionCapturePayload {
   kind: Exclude<SelectionKind, 'note'>;
   format: Exclude<SelectionFormat, 'note'>;
+  orderKey?: string | undefined;
   selectionKey?: string | undefined;
   text: string;
   htmlSnippet?: string | undefined;
@@ -134,6 +170,7 @@ export type DraftAction =
 export type ExtensionMessage =
   | { type: 'START_PICKER'; tabId: number }
   | { type: 'STOP_PICKER'; tabId: number }
+  | { type: 'RESTART_EXTRACTION'; tabId: number }
   | { type: 'CAPTURE_PRIMARY_CONTENT'; tabId: number }
   | { type: 'LOAD_DRAFT'; tabId: number }
   | { type: 'CLEAR_DRAFT'; tabId: number }

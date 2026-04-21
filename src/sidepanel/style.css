@@ -116,7 +116,6 @@ pre {
 .action-row {
   display: flex;
   align-items: flex-start;
-  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 0.5rem;
 }
@@ -205,6 +204,35 @@ pre {
   margin-top: 1rem;
   max-height: 480px;
   overflow: auto;
+}
+
+.markdown-blocks {
+  display: grid;
+  gap: 0.85rem;
+  margin-top: 1rem;
+}
+
+.markdown-block {
+  border-radius: 18px;
+  border: 1px solid rgba(23, 33, 38, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 1) 0%, rgba(248, 251, 251, 1) 100%);
+  padding: 0.85rem;
+}
+
+.markdown-block pre {
+  margin-top: 0;
+  max-height: 220px;
+}
+
+.markdown-block-header {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.45rem;
+}
+
+.markdown-block-spacer {
+  display: block;
+  min-height: 1px;
 }
 
 @media (min-width: 900px) {

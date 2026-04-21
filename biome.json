@@ -27,6 +27,14 @@
     }
   },
   "files": {
-    "includes": ["**", "!dist", "!playwright-report", "!test-results", "!coverage"]
+    "includes": [
+      "**",
+      "!dist",
+      "!playwright-report",
+      "!test-results",
+      "!coverage",
+      "!amazon-1.html",
+      "!amazon-2.html"
+    ]
   }
 }
