@@ -13,7 +13,7 @@ No debe depender de componentes React ni de detalles del DOM inyectado cuando no
 | --- | --- |
 | `src/shared/types.ts` | Tipos base del draft, mensajes, formatos semánticos y payloads de captura; el draft normalizado expone `blocksByKey` y `orderedKeys` además del snapshot `items`. |
 | `src/shared/draft.ts` | Reducer y helpers del modelo normalizado del draft: identidad estable por `selectionKey`, inclusión explícita por `orderedKeys`, snapshot derivado de `items`, migración lazy desde drafts legacy y flags persistidos como `includeContext`. |
-| `src/shared/extractionProfiles.ts` | Perfiles serializables de extracción por sitio, con `reveal` seguro opcional por selector o texto exacto, postproceso Amazon para filtrar ruido comercial/de entrega, supresión de hero image y fusión de tablas key/value del side sheet antes del fallback genérico. |
+| `src/shared/extractionProfiles.ts` | Perfiles serializables de extracción por sitio, con `reveal` seguro opcional por selector o texto exacto; Amazon aplica postproceso para filtrar ruido comercial/de entrega, suprimir hero image y fusionar tablas key/value del side sheet, y Substack ancla a `article.newsletter-post.post` para extraer título/subtítulo/body en orden editorial excluyendo subscribe/share/comments. |
 | `src/shared/markdown.ts` | Generación del archivo Markdown final y de los bloques renderizados para preview, a partir del orden explícito del draft normalizado, con prepend opcional de contexto y sin referencias DOM automáticas. |
 | `src/shared/siteAdapters.ts` | Detección Amazon/Shopify y extracción de metadata. |
 | `src/shared/selectionUtils.ts` | Normalización de texto, snippets, inferencia conservadora de listas desde texto y limpieza de ruido DOM. |
@@ -37,6 +37,8 @@ No debe depender de componentes React ni de detalles del DOM inyectado cuando no
 - Para Amazon, el perfil debe combinar `pqv` pre-renderizado con bloques revelados de `#item_details` y `#voyager-ns-desktop-side-sheet-content` cuando existan.
 - Para Amazon, `Información importante` puede venir tanto de `pqv` como de `#important-information`; el perfil debe soportar ambas variantes y colapsar headings/subbloques duplicados exactos dentro de esa región.
 - Para Amazon, el postproceso debe seguir siendo narrow: filtrar solo ruido conocido de entrega/listas, omitir la hero image automática y fusionar únicamente tablas simples de dos columnas del side sheet `voyager`.
+- Para Substack, el perfil debe anclarse al `article` canónico del post y reservar el `#` al título publicado; el resto del cuerpo se extrae desde hijos directos de `.available-content > .body.markup` para evitar masthead, UFI, subscribe widget y comentarios.
+- Para Substack, el filtro de ruido debe seguir siendo narrow: publication wordmark, subscribe/sign-in/share/comments y CTA final de reader-supported publication, sin tocar párrafos editoriales reales del post.
 - Los `selectorHint` usados para dedupe y rehighlight deben distinguir hermanos repetidos aunque compartan clase; cuando haya múltiples siblings del mismo tag, conservar `:nth-of-type(...)` incluso si existe `class`.
 - El reducer no debe usar dedupe por texto como identidad principal. Si se necesita suprimir duplicados textuales, eso debe ocurrir aguas arriba en la extracción o como postproceso específico por sitio.
 

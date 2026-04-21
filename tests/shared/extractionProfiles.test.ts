@@ -288,4 +288,102 @@ describe('extractWithSiteProfile', () => {
       ),
     ).toBe(false);
   });
+
+  it('en Substack ancla al post canónico y excluye chrome de publicación, CTA y comentarios', () => {
+    const document = loadFixture('substack-post.html');
+    const url = new URL('https://cosmobiota.substack.com/p/that-two-times-e-to-the-two-i-pi');
+
+    const result = extractWithSiteProfile(document, url);
+
+    expect(result).not.toBeNull();
+    if (result == null) {
+      throw new Error('El perfil de Substack no fue detectado.');
+    }
+
+    expect(result.profileId).toBe('substack');
+    expect(result.revealApplied).toBe(false);
+    expect(result.selections[0]?.format).toBe('heading');
+    expect(result.selections[0]?.headingLevel).toBe(1);
+    expect(result.selections[0]?.text).toBe(
+      'That "Two Times e to the Two-i-pi" Thing from Project Hail Mary, Explained',
+    );
+    expect(
+      result.selections.some(
+        (selection) =>
+          selection.format === 'heading' &&
+          selection.headingLevel === 3 &&
+          selection.text.includes('A romp through number theory'),
+      ),
+    ).toBe(true);
+    expect(
+      result.selections.some(
+        (selection) =>
+          selection.format === 'paragraph' && selection.text.toLowerCase() === 'graham lau',
+      ),
+    ).toBe(true);
+    expect(
+      result.selections.some(
+        (selection) => selection.format === 'paragraph' && selection.text === 'Feb 16, 2026',
+      ),
+    ).toBe(true);
+    expect(
+      result.selections.some(
+        (selection) =>
+          selection.format === 'paragraph' &&
+          selection.text.includes('The Astrobiology and Panzoic Book Club'),
+      ),
+    ).toBe(true);
+    expect(
+      result.selections.some(
+        (selection) =>
+          selection.format === 'heading' &&
+          selection.headingLevel === 2 &&
+          selection.text === 'Math time!',
+      ),
+    ).toBe(true);
+    expect(
+      result.selections.some(
+        (selection) =>
+          selection.format === 'heading' &&
+          selection.headingLevel === 3 &&
+          selection.text === 'Types of Numbers',
+      ),
+    ).toBe(true);
+    expect(
+      result.selections.some(
+        (selection) =>
+          selection.format === 'list' &&
+          selection.listItems?.some((item) =>
+            item.includes('Saying 2e2πi is actually the same thing as saying 2'),
+          ) === true,
+      ),
+    ).toBe(true);
+    expect(
+      result.selections.some(
+        (selection) =>
+          selection.format === 'image' &&
+          selection.imageUrl?.includes('817b3a0e-54df-445b-ae13-128df426544b') === true,
+      ),
+    ).toBe(true);
+
+    expect(
+      result.selections.some(
+        (selection) => selection.format === 'heading' && selection.text === 'The Cosmobiologist',
+      ),
+    ).toBe(false);
+    expect(result.selections.some((selection) => selection.text === 'Subscribe')).toBe(false);
+    expect(result.selections.some((selection) => selection.text === 'Sign in')).toBe(false);
+    expect(result.selections.some((selection) => selection.text === 'Share')).toBe(false);
+    expect(result.selections.some((selection) => selection.text === 'Comments')).toBe(false);
+    expect(
+      result.selections.some((selection) =>
+        selection.text.includes('reader-supported publication'),
+      ),
+    ).toBe(false);
+    expect(
+      result.selections.some((selection) =>
+        selection.text.includes('Subscribe to The Cosmobiologist'),
+      ),
+    ).toBe(false);
+  });
 });

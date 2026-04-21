@@ -25,6 +25,7 @@ const fixtureMap: Record<string, string> = {
   '/amazon-product-important-info.html': 'amazon-product-important-info.html',
   '/amazon-product-noisy.html': 'amazon-product-noisy.html',
   '/shopify-product.html': 'shopify-product.html',
+  '/substack-post.html': 'substack-post.html',
 };
 
 const test = base.extend<ExtensionFixtures>({
@@ -37,6 +38,8 @@ const test = base.extend<ExtensionFixtures>({
 
     await use(`http://127.0.0.1:${address.port}`);
     await new Promise<void>((resolvePromise, rejectPromise) => {
+      server.closeAllConnections?.();
+      server.closeIdleConnections?.();
       server.close((error) => {
         if (error != null) {
           rejectPromise(error);
@@ -414,6 +417,47 @@ test('reiniciar regenera la extracción desde cero', async ({
 
   await panel.close();
   await productPage.close();
+});
+
+test('Substack extrae el post canónico y excluye chrome editorial y CTA', async ({
+  context,
+  extensionId,
+  serviceWorker,
+  serverOrigin,
+}) => {
+  const postPage = await context.newPage();
+  await postPage.goto(`${serverOrigin}/substack-post.html`, { waitUntil: 'domcontentloaded' });
+  const tabId = await getTabIdForUrl(serviceWorker, `${serverOrigin}/substack-post.html`);
+  const panel = await openPanel(context, extensionId, tabId);
+
+  await activateExtraction(panel);
+
+  const preview = previewRegion(panel);
+  await expect(preview).toContainText(
+    '# That "Two Times e to the Two-i-pi" Thing from Project Hail Mary, Explained',
+  );
+  await expect(preview).toContainText(
+    "### A romp through number theory, geometry and trigonometry, the unit circle, Euler's formula, complex numbers, and more to find the cube roots of eight",
+  );
+  await expect(preview).toContainText(/graham lau/i);
+  await expect(preview).toContainText(/feb 16, 2026/i);
+  await expect(preview).toContainText('## Math time!');
+  await expect(preview).toContainText('### Types of Numbers');
+  await expect(preview).toContainText(
+    'The Astrobiology and Panzoic Book Club is reading Andy Weir’s phenomenal book',
+  );
+  await expect(preview).toContainText('- Saying 2e2πi is actually the same thing as saying 2');
+  await expect(preview).toContainText('![');
+  await expect(preview).not.toContainText('# The Cosmobiologist');
+  await expect(preview).not.toContainText('Subscribe to The Cosmobiologist');
+  await expect(preview).not.toContainText('reader-supported publication');
+  await expect(preview).not.toContainText('\nSubscribe\n');
+  await expect(preview).not.toContainText('\nSign in\n');
+  await expect(preview).not.toContainText('\nShare\n');
+  await expect(preview).not.toContainText('\nComments\n');
+
+  await panel.close();
+  await postPage.close();
 });
 
 test('Amazon revela secciones ocultas seguras antes de extraer', async ({

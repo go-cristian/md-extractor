@@ -14,6 +14,99 @@ import type {
 
 export const siteExtractionProfiles: SiteExtractionProfile[] = [
   {
+    id: 'substack',
+    hostnames: ['substack.com'],
+    signals: ['article.typography.newsletter-post.post', 'h1.post-title.published'],
+    anchorSelectors: [
+      'article.typography.newsletter-post.post > .post-header > h1.post-title.published',
+      'article.newsletter-post.post .post-header h1.post-title.published',
+      'h1.post-title.published',
+    ],
+    blocks: [
+      {
+        type: 'heading',
+        selectors: [
+          'article.typography.newsletter-post.post > .post-header > h1.post-title.published',
+          'article.newsletter-post.post .post-header h1.post-title.published',
+        ],
+        headingLevel: 1,
+      },
+      {
+        type: 'heading',
+        selectors: [
+          'article.typography.newsletter-post.post > .post-header > h3.subtitle',
+          'article.newsletter-post.post .post-header h3.subtitle',
+        ],
+        headingLevel: 3,
+      },
+      {
+        type: 'paragraph',
+        selectors: [
+          'article.typography.newsletter-post.post .post-header .byline-wrapper a[href*="@"]',
+        ],
+      },
+      {
+        type: 'paragraph',
+        selectors: [
+          'article.typography.newsletter-post.post .post-header .byline-wrapper .pc-gap-4 > div',
+        ],
+      },
+      {
+        type: 'paragraph',
+        selectors: [
+          'article.typography.newsletter-post.post .available-content > .body.markup > blockquote',
+          'article.typography.newsletter-post.post .available-content > .body.markup > p',
+          'article.typography.newsletter-post.post .available-content > .body.markup > figure figcaption',
+          'article.typography.newsletter-post.post .available-content > .body.markup > .captioned-image-container figcaption',
+          'article.typography.newsletter-post.post .available-content > .body.markup > .captioned-image-container .caption',
+        ],
+      },
+      {
+        type: 'heading',
+        selectors: [
+          'article.typography.newsletter-post.post .available-content > .body.markup > h1',
+        ],
+        headingLevel: 2,
+      },
+      {
+        type: 'heading',
+        selectors: [
+          'article.typography.newsletter-post.post .available-content > .body.markup > h2',
+        ],
+        headingLevel: 3,
+      },
+      {
+        type: 'heading',
+        selectors: [
+          'article.typography.newsletter-post.post .available-content > .body.markup > h3',
+        ],
+        headingLevel: 4,
+      },
+      {
+        type: 'heading',
+        selectors: [
+          'article.typography.newsletter-post.post .available-content > .body.markup > h4',
+        ],
+        headingLevel: 5,
+      },
+      {
+        type: 'list',
+        selectors: [
+          'article.typography.newsletter-post.post .available-content > .body.markup > ul',
+          'article.typography.newsletter-post.post .available-content > .body.markup > ol',
+        ],
+      },
+      {
+        type: 'image',
+        selectors: [
+          'article.typography.newsletter-post.post .available-content > .body.markup > figure img',
+          'article.typography.newsletter-post.post .available-content > .body.markup > .captioned-image-container img',
+          'article.typography.newsletter-post.post .available-content > .body.markup > img',
+        ],
+      },
+    ],
+  },
+  {
     id: 'amazon',
     hostnames: ['amazon.com', 'amazon.es', 'amazon.com.mx', 'amazon.co.uk'],
     signals: ['#productTitle', '#dp-container'],
@@ -389,6 +482,16 @@ const AMAZON_NOISE_PATTERNS: RegExp[] = [
   /^no puede enviarse este producto al punto de entrega seleccionado\b/i,
 ];
 
+const SUBSTACK_NOISE_PATTERNS: RegExp[] = [
+  /^the cosmobiologist$/i,
+  /^subscribe$/i,
+  /^sign in$/i,
+  /^share$/i,
+  /^comments?$/i,
+  /reader-supported publication/i,
+  /^subscribe to\b/i,
+];
+
 function isAmazonNoiseSelection(
   selection: SelectionCapturePayload,
   anchorText: string | null,
@@ -411,6 +514,29 @@ function isAmazonNoiseSelection(
   }
 
   return AMAZON_NOISE_PATTERNS.some((pattern) => pattern.test(comparableText));
+}
+
+function isSubstackNoiseSelection(
+  selection: SelectionCapturePayload,
+  anchorText: string | null,
+): boolean {
+  const comparableText = normalizeComparableText(selection.text);
+  if (comparableText.length === 0) {
+    return false;
+  }
+
+  if (anchorText != null && selection.format !== 'heading' && comparableText === anchorText) {
+    return true;
+  }
+
+  if (SUBSTACK_NOISE_PATTERNS.some((pattern) => pattern.test(comparableText))) {
+    return true;
+  }
+
+  return (
+    selection.selectorHint?.includes('subscription-widget') === true ||
+    selection.selectorHint?.includes('comment') === true
+  );
 }
 
 function isSimpleKeyValueTable(selection: SelectionCapturePayload): boolean {
@@ -500,6 +626,13 @@ function normalizeAmazonSelections(
   );
 
   return normalizeAmazonImportantInformation(mergeAmazonSpecTables(filteredSelections));
+}
+
+function normalizeSubstackSelections(
+  selections: SelectionCapturePayload[],
+  anchorText: string | null,
+): SelectionCapturePayload[] {
+  return selections.filter((selection) => !isSubstackNoiseSelection(selection, anchorText));
 }
 
 function isAmazonImportantInformationSelection(selection: SelectionCapturePayload): boolean {
@@ -660,6 +793,20 @@ export function extractWithSiteProfile(
     return null;
   }
 
+  const normalizeSelectionsForProfile = (
+    orderedSelections: SelectionCapturePayload[],
+    comparableAnchorText: string | null,
+  ): SelectionCapturePayload[] => {
+    switch (profile.id) {
+      case 'amazon':
+        return normalizeAmazonSelections(orderedSelections, comparableAnchorText);
+      case 'substack':
+        return normalizeSubstackSelections(orderedSelections, comparableAnchorText);
+      default:
+        return orderedSelections;
+    }
+  };
+
   const anchor = anchorElement(document, profile);
   if (anchor == null) {
     const sortedSelections = selections.sort((left, right) =>
@@ -668,10 +815,7 @@ export function extractWithSiteProfile(
     return {
       profileId: profile.id,
       revealApplied,
-      selections:
-        profile.id === 'amazon'
-          ? normalizeAmazonSelections(sortedSelections, null)
-          : sortedSelections,
+      selections: normalizeSelectionsForProfile(sortedSelections, null),
     };
   }
 
@@ -707,9 +851,6 @@ export function extractWithSiteProfile(
   return {
     profileId: profile.id,
     revealApplied,
-    selections:
-      profile.id === 'amazon'
-        ? normalizeAmazonSelections(orderedSelections, comparableAnchorText)
-        : orderedSelections,
+    selections: normalizeSelectionsForProfile(orderedSelections, comparableAnchorText),
   };
 }

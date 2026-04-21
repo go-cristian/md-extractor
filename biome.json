@@ -33,8 +33,11 @@
       "!playwright-report",
       "!test-results",
       "!coverage",
+      "!tests/fixtures/**/*.html",
       "!amazon-1.html",
-      "!amazon-2.html"
+      "!amazon-2.html",
+      "!substack-1.html",
+      "!substack.md"
     ]
   }
 }

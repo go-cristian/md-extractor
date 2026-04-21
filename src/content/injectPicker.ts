@@ -66,6 +66,15 @@ export function runPickerAction(
     /^lista no disponible\.?$/i,
     /^no puede enviarse este producto al punto de entrega seleccionado\b/i,
   ];
+  const SUBSTACK_NOISE_PATTERNS: RegExp[] = [
+    /^the cosmobiologist$/i,
+    /^subscribe$/i,
+    /^sign in$/i,
+    /^share$/i,
+    /^comments?$/i,
+    /reader-supported publication/i,
+    /^subscribe to\b/i,
+  ];
 
   function normalizeLineText(value: string): string {
     return value.replace(/\s+/g, ' ').trim();
@@ -854,6 +863,29 @@ export function runPickerAction(
     return AMAZON_NOISE_PATTERNS.some((pattern) => pattern.test(comparableText));
   }
 
+  function isSubstackNoiseSelection(
+    selection: SelectionCapturePayload,
+    anchorText: string | null,
+  ): boolean {
+    const comparableText = normalizeComparableText(selection.text);
+    if (comparableText.length === 0) {
+      return false;
+    }
+
+    if (anchorText != null && selection.format !== 'heading' && comparableText === anchorText) {
+      return true;
+    }
+
+    if (SUBSTACK_NOISE_PATTERNS.some((pattern) => pattern.test(comparableText))) {
+      return true;
+    }
+
+    return (
+      selection.selectorHint?.includes('subscription-widget') === true ||
+      selection.selectorHint?.includes('comment') === true
+    );
+  }
+
   function isSimpleKeyValueTable(selection: SelectionCapturePayload): boolean {
     return (
       selection.format === 'table' &&
@@ -943,6 +975,13 @@ export function runPickerAction(
     );
 
     return normalizeAmazonImportantInformation(mergeAmazonSpecTables(filteredSelections));
+  }
+
+  function normalizeSubstackSelections(
+    selections: SelectionCapturePayload[],
+    anchorText: string | null,
+  ): SelectionCapturePayload[] {
+    return selections.filter((selection) => !isSubstackNoiseSelection(selection, anchorText));
   }
 
   function isAmazonImportantInformationSelection(selection: SelectionCapturePayload): boolean {
@@ -1106,15 +1145,28 @@ export function runPickerAction(
     if (selections.length === 0) {
       return null;
     }
+
+    const normalizeSelectionsForProfile = (
+      orderedSelections: SelectionCapturePayload[],
+      comparableAnchorText: string | null,
+    ): SelectionCapturePayload[] => {
+      switch (profile.id) {
+        case 'amazon':
+          return normalizeAmazonSelections(orderedSelections, comparableAnchorText);
+        case 'substack':
+          return normalizeSubstackSelections(orderedSelections, comparableAnchorText);
+        default:
+          return orderedSelections;
+      }
+    };
+
     const anchor = anchorElement(profile);
     if (anchor == null) {
       const sortedSelections = selections.sort((left, right) =>
         (left.orderKey ?? '').localeCompare(right.orderKey ?? ''),
       );
 
-      return profile.id === 'amazon'
-        ? normalizeAmazonSelections(sortedSelections, null)
-        : sortedSelections;
+      return normalizeSelectionsForProfile(sortedSelections, null);
     }
 
     const anchorOrderKey = buildOrderKey(anchor);
@@ -1146,9 +1198,7 @@ export function runPickerAction(
       return (left.orderKey ?? '').localeCompare(right.orderKey ?? '');
     });
 
-    return profile.id === 'amazon'
-      ? normalizeAmazonSelections(orderedSelections, comparableAnchorText)
-      : orderedSelections;
+    return normalizeSelectionsForProfile(orderedSelections, comparableAnchorText);
   }
 
   function createPageContext(): PageContextPayload {

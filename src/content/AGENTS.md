@@ -11,7 +11,7 @@ No persiste estado de producto ni renderiza la UI del panel lateral.
 
 | Path | Description |
 | --- | --- |
-| `src/content/injectPicker.ts` | Función autocontenida inyectada con `chrome.scripting.executeScript`, responsable de intentar primero perfiles por sitio con `reveal` seguro por selector o texto exacto, aplicar el mismo postproceso Amazon que la capa shared, caer al fallback genérico cuando haga falta, sincronizar highlights persistentes y permitir toggles por click sobre bloques semánticos. |
+| `src/content/injectPicker.ts` | Función autocontenida inyectada con `chrome.scripting.executeScript`, responsable de intentar primero perfiles por sitio con `reveal` seguro por selector o texto exacto, reflejar el mismo postproceso por perfil que la capa shared (Amazon y Substack), caer al fallback genérico cuando haga falta, sincronizar highlights persistentes y permitir toggles por click sobre bloques semánticos. |
 
 ## Conventions
 
@@ -29,6 +29,7 @@ No persiste estado de producto ni renderiza la UI del panel lateral.
 - Como `runPickerAction` se serializa al inyectarse, cualquier perfil por sitio debe entrar como dato serializable; no depender de imports runtime dentro del cuerpo inyectado.
 - El runtime del picker debe reflejar cualquier postproceso de perfiles críticos como Amazon: mismo filtro de ruido, misma supresión de hero image y misma fusión de tablas `voyager`, para que el preview real no diverja de `extractWithSiteProfile`.
 - Cuando Amazon exponga `Información importante` tanto en `pqv` como en `#important-information`, el runtime debe deduplicar headings/subsecciones repetidas exactas dentro de esa región para que el Markdown no duplique disclaimers ni subtítulos.
+- Cuando Substack aplique, el runtime debe trabajar sobre el artículo canónico y mantener el mismo filtro de subscribe/share/comments y CTA final que la capa shared; si divergen, el preview del sidepanel mostrará ruido que no aparece en unit tests.
 - Cuando un `selectorHint` sirva para dedupe o highlights de nodos repetidos, debe conservar `:nth-of-type(...)` aunque la clase sea compartida; de lo contrario Amazon colapsa tablas hermanas válidas.
 - Todo bloque emitido desde la página debe traer `selectionKey`, `selectorHint` y `orderKey` coherentes entre sí; el background usa esa triple relación para persistencia, reactivación y rehighlighting sobre el draft normalizado.
 

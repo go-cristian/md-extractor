@@ -5,3 +5,5 @@ playwright-report/
 test-results/
 .vscode/
 .DS_Store
+substack-1.html
+substack.md
